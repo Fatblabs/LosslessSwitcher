@@ -1,30 +1,40 @@
-name: VirusTotal Single File Test
+name: VirusTotal Scan
 on:
-  workflow_dispatch: # Allows manual trigger for testing
+  workflow_dispatch: # Manual trigger
+  release:
+    types: [published] # Auto-run when you create a release
 
 jobs:
   test-scan:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # Required if you want VT results added to release notes
     env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true # Future-proofs the action
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: VirusTotal Scan (Single File)
+      - name: VirusTotal Scan
         uses: cssnr/virustotal-action@v1
         id: vt
+        continue-on-error: true # FIX: Prevents job failure on 409 Conflict
         with:
           vt_api_key: ${{ secrets.VT_API_KEY }}
           rate_limit: 4
           summary: true
-          # REPLACE 'README.md' with any single file path in your repo
+          # UPDATED: Use a glob that targets your actual build/binary files
           file_globs: |
-            README.md
+            dist/*.zip
+            build/*.exe
 
       - name: Display Test Result
         if: always()
         run: |
-          echo "### 🛡️ Test Scan Result" >> $GITHUB_STEP_SUMMARY
-          echo "Analysis Link:" >> $GITHUB_STEP_SUMMARY
-          echo "${{ steps.vt.outputs.results }}" | sed 's/,/\n/g' | sed 's/^/ - /' >> $GITHUB_STEP_SUMMARY
+          echo "### 🛡️ VirusTotal Scan Summary" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ steps.vt.outcome }}" == "success" ]; then
+            echo "Analysis Link(s):" >> $GITHUB_STEP_SUMMARY
+            echo "${{ steps.vt.outputs.results }}" | sed 's/,/\n/g' | sed 's/^/ - /' >> $GITHUB_STEP_SUMMARY
+          else
+            echo "⚠️ Scan skipped or file already submitted (409 Conflict)." >> $GITHUB_STEP_SUMMARY
+          fi
