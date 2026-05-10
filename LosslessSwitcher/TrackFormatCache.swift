@@ -51,14 +51,55 @@ final class TrackFormatCache {
 
     @discardableResult
     func store(_ source: DetectedAudioSource) -> Bool {
+        guard let nextEntry = cacheEntry(for: source) else {
+            return false
+        }
+
+        let changed = upsert(nextEntry)
+        if changed {
+            pruneIfNeeded()
+            save()
+        }
+
+        return changed
+    }
+
+    @discardableResult
+    func storeAll(_ sources: [DetectedAudioSource]) -> Int {
+        var changedCount = 0
+
+        for source in sources {
+            guard let nextEntry = cacheEntry(for: source) else {
+                continue
+            }
+
+            if upsert(nextEntry) {
+                changedCount += 1
+            }
+        }
+
+        if changedCount > 0 {
+            pruneIfNeeded()
+            save()
+        }
+
+        return changedCount
+    }
+
+    func clear() {
+        entries.removeAll()
+        try? FileManager.default.removeItem(at: fileURL)
+    }
+
+    private func cacheEntry(for source: DetectedAudioSource) -> CachedTrackFormat? {
         guard source.isSampleRateReliable,
               source.formatSource != "Cached format",
               source.sampleRate > 0,
               let key = source.cacheKey else {
-            return false
+            return nil
         }
 
-        let nextEntry = CachedTrackFormat(
+        return CachedTrackFormat(
             key: key,
             title: source.displayTitle,
             artist: source.displayArtist,
@@ -68,8 +109,10 @@ final class TrackFormatCache {
             source: source.formatSource,
             updatedAt: Date()
         )
+    }
 
-        if let existingEntry = entries[key],
+    private func upsert(_ nextEntry: CachedTrackFormat) -> Bool {
+        if let existingEntry = entries[nextEntry.key],
            existingEntry.title == nextEntry.title,
            existingEntry.artist == nextEntry.artist,
            existingEntry.album == nextEntry.album,
@@ -78,15 +121,8 @@ final class TrackFormatCache {
             return false
         }
 
-        entries[key] = nextEntry
-        pruneIfNeeded()
-        save()
+        entries[nextEntry.key] = nextEntry
         return true
-    }
-
-    func clear() {
-        entries.removeAll()
-        try? FileManager.default.removeItem(at: fileURL)
     }
 
     private func load() {

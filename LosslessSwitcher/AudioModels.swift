@@ -130,6 +130,38 @@ struct SwitchLogEntry: Identifiable, Hashable, Sendable {
     let isError: Bool
 }
 
+enum MusicLibraryCacheScope: String, Identifiable, Sendable {
+    case currentAlbum
+    case currentPlaylist
+
+    var id: String {
+        rawValue
+    }
+
+    var label: String {
+        switch self {
+        case .currentAlbum:
+            return "Album"
+        case .currentPlaylist:
+            return "Playlist"
+        }
+    }
+}
+
+struct MusicLibraryTrackScan: Hashable, Sendable {
+    let scope: MusicLibraryCacheScope
+    let name: String
+    let totalTrackCount: Int
+    let scannedTrackCount: Int
+    let tracks: [DetectedAudioSource]
+}
+
+enum MusicLibraryTrackScanResult: Hashable, Sendable {
+    case success(MusicLibraryTrackScan)
+    case inactive(String)
+    case failed(String)
+}
+
 func sampleRateLabel(_ sampleRate: Double) -> String {
     let khz = sampleRate / 1_000
     if abs(khz.rounded() - khz) < 0.01 {

@@ -52,6 +52,7 @@ final class LosslessSwitcherController: NSObject, ObservableObject {
     @Published private(set) var logEntries: [SwitchLogEntry] = []
     @Published private(set) var cachedTrackCount = 0
     @Published private(set) var isLaunchAtLoginEnabled = false
+    @Published private(set) var isLibraryCacheScanInProgress = false
 
     private enum Defaults {
         static let autoSwitchEnabled = "autoSwitchEnabled"
@@ -287,6 +288,66 @@ final class LosslessSwitcherController: NSObject, ObservableObject {
         formatCache.clear()
         cachedTrackCount = formatCache.count
         appendLog(title: "Song Memory Cleared", detail: "Removed all cached song formats", isError: false)
+    }
+
+    func cacheCurrentAlbum() {
+        cacheLibraryScope(.currentAlbum)
+    }
+
+    func cacheCurrentPlaylist() {
+        cacheLibraryScope(.currentPlaylist)
+    }
+
+    private func cacheLibraryScope(_ scope: MusicLibraryCacheScope) {
+        guard !isLibraryCacheScanInProgress else {
+            return
+        }
+
+        isLibraryCacheScanInProgress = true
+        lastSwitchStatus = "Scanning \(scope.label.lowercased())..."
+        appendLog(title: "Song Memory Scan", detail: "Reading current \(scope.label.lowercased()) metadata", isError: false)
+
+        let detector = musicDetector
+        detectionQueue.async { [weak self] in
+            let result = detector.scanTracks(scope: scope)
+
+            DispatchQueue.main.async { [weak self] in
+                self?.finishLibraryCacheScan(result)
+            }
+        }
+    }
+
+    private func finishLibraryCacheScan(_ result: MusicLibraryTrackScanResult) {
+        isLibraryCacheScanInProgress = false
+
+        switch result {
+        case .success(let scan):
+            let cacheableTracks = scan.tracks.filter(\.isSampleRateReliable)
+            let storedCount = formatCache.storeAll(cacheableTracks)
+            cachedTrackCount = formatCache.count
+            let skippedCount = max(scan.scannedTrackCount - cacheableTracks.count, 0)
+            let limitedSuffix = scan.scannedTrackCount < scan.totalTrackCount
+                ? " Scanned first \(scan.scannedTrackCount) of \(scan.totalTrackCount)."
+                : ""
+            let skippedSuffix = skippedCount > 0
+                ? " Skipped \(skippedCount) streaming/unknown tracks."
+                : ""
+
+            lastSwitchStatus = "\(scan.scope.label) cache updated: \(storedCount) new"
+            appendLog(
+                title: "\(scan.scope.label) Cached",
+                detail: "\(scan.name): \(storedCount) new, \(cacheableTracks.count) usable.\(skippedSuffix)\(limitedSuffix)",
+                isError: false
+            )
+
+        case .inactive(let message):
+            lastSwitchStatus = message
+            appendLog(title: "Song Memory Scan Skipped", detail: message, isError: true)
+
+        case .failed(let message):
+            lastSwitchStatus = message
+            appendLog(title: "Song Memory Scan Failed", detail: message, isError: true)
+        }
     }
 
     func refreshLaunchAtLoginStatus() {

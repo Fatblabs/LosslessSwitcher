@@ -109,6 +109,8 @@ struct ContentView: View {
                         }
                         .buttonStyle(AppButtonStyle(tint: .mint))
                     }
+
+                    cacheActionButtons
                 }
             } else {
                 EmptyStateView(
@@ -133,6 +135,8 @@ struct ContentView: View {
                     }
                     .buttonStyle(AppButtonStyle(tint: .mint))
                 }
+
+                cacheActionButtons
             }
         }
     }
@@ -279,6 +283,31 @@ struct ContentView: View {
         }
     }
 
+    private var cacheActionButtons: some View {
+        HStack(spacing: 10) {
+            Button {
+                controller.cacheCurrentAlbum()
+            } label: {
+                Label("Cache Album", systemImage: "square.stack")
+            }
+            .buttonStyle(AppButtonStyle(tint: .indigo))
+            .disabled(controller.isLibraryCacheScanInProgress)
+
+            Button {
+                controller.cacheCurrentPlaylist()
+            } label: {
+                Label("Cache Playlist", systemImage: "music.note.list")
+            }
+            .buttonStyle(AppButtonStyle(tint: .indigo))
+            .disabled(controller.isLibraryCacheScanInProgress)
+
+            if controller.isLibraryCacheScanInProgress {
+                ProgressView()
+                    .controlSize(.small)
+            }
+        }
+    }
+
     private func sourceLine(for source: DetectedAudioSource) -> String {
         [source.displayArtist, source.album]
             .filter { !$0.isEmpty }
@@ -332,6 +361,13 @@ struct SettingsControlsView: View {
                 systemImage: "dock.rectangle",
                 tint: .indigo,
                 isOn: $controller.isMenuBarOnlyModeEnabled
+            )
+
+            LibraryCacheActionsRow(
+                isScanning: controller.isLibraryCacheScanInProgress,
+                compact: compact,
+                cacheAlbum: controller.cacheCurrentAlbum,
+                cachePlaylist: controller.cacheCurrentPlaylist
             )
 
             SettingToggleRow(
@@ -727,6 +763,56 @@ private struct CacheControlRow: View {
                 Label("Clear", systemImage: "trash")
             }
             .disabled(count == 0)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+}
+
+private struct LibraryCacheActionsRow: View {
+    let isScanning: Bool
+    let compact: Bool
+    let cacheAlbum: () -> Void
+    let cachePlaylist: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 10) {
+                Image(systemName: "rectangle.stack.badge.play")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(.mint)
+                    .frame(width: 24, height: 24)
+                    .background(Color.mint.opacity(0.1), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Bulk Memory")
+                        .font(.subheadline.weight(.medium))
+                    Text(isScanning ? "Scanning Music" : "Current album or playlist")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer(minLength: 8)
+
+                if isScanning {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+            }
+
+            HStack(spacing: 8) {
+                Button(action: cacheAlbum) {
+                    Label(compact ? "Album" : "Cache Album", systemImage: "square.stack")
+                }
+                .disabled(isScanning)
+
+                Button(action: cachePlaylist) {
+                    Label(compact ? "Playlist" : "Cache Playlist", systemImage: "music.note.list")
+                }
+                .disabled(isScanning)
+            }
+            .buttonStyle(.bordered)
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
