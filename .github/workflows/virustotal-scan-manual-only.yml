@@ -17,7 +17,8 @@ jobs:
         run: |
           set -euo pipefail
 
-          mkdir -p vt-report
+          REPORT_DIR="$RUNNER_TEMP/vt-report"
+          mkdir -p "$REPORT_DIR"
 
           {
             echo "# VirusTotal Scanned Files"
@@ -28,11 +29,11 @@ jobs:
             echo
             echo "## Files"
             echo
-          } > vt-report/scanned-files.md
+          } > "$REPORT_DIR/scanned-files.md"
 
           git ls-files \
-            ':!:node_modules/**' \
             ':!:.github/**' \
+            ':!:node_modules/**' \
             ':!:dist/**' \
             ':!:build/**' \
             ':!:DerivedData/**' \
@@ -41,18 +42,30 @@ jobs:
             ':!:*.yml' \
             ':!:*.yaml' \
             ':!:*.json' \
-            | sort > vt-report/scanned-files.txt
+            ':!:*.png' \
+            ':!:*.jpg' \
+            ':!:*.jpeg' \
+            ':!:*.gif' \
+            ':!:*.webp' \
+            ':!:*.ico' \
+            ':!:*.icns' \
+            ':!:*.pdf' \
+            ':!:*.zip' \
+            ':!:*.dmg' \
+            ':!:*.xcuserstate' \
+            ':!:*.xcuserdata/**' \
+            | sort > "$REPORT_DIR/scanned-files.txt"
 
-          FILE_COUNT="$(wc -l < vt-report/scanned-files.txt | tr -d ' ')"
+          FILE_COUNT="$(wc -l < "$REPORT_DIR/scanned-files.txt" | tr -d ' ')"
 
           while IFS= read -r file; do
-            echo "- \`$file\`" >> vt-report/scanned-files.md
-          done < vt-report/scanned-files.txt
+            echo "- \`$file\`" >> "$REPORT_DIR/scanned-files.md"
+          done < "$REPORT_DIR/scanned-files.txt"
 
           {
             echo
             echo "Total files listed for scan: $FILE_COUNT"
-          } >> vt-report/scanned-files.md
+          } >> "$REPORT_DIR/scanned-files.md"
 
           echo "Files listed for scan: $FILE_COUNT"
 
@@ -64,20 +77,32 @@ jobs:
           files: |
             **/*
             !.git/**
-            !node_modules/**
             !.github/**
+            !node_modules/**
             !dist/**
             !build/**
             !DerivedData/**
-            !*.md
-            !*.txt
-            !*.yml
-            !*.yaml
-            !*.json
+            !**/*.md
+            !**/*.txt
+            !**/*.yml
+            !**/*.yaml
+            !**/*.json
+            !**/*.png
+            !**/*.jpg
+            !**/*.jpeg
+            !**/*.gif
+            !**/*.webp
+            !**/*.ico
+            !**/*.icns
+            !**/*.pdf
+            !**/*.zip
+            !**/*.dmg
+            !**/*.xcuserstate
+            !**/*.xcuserdata/**
 
       - name: Upload scanned file list
         uses: actions/upload-artifact@v6
         if: always()
         with:
           name: virustotal-scanned-file-list
-          path: vt-report/
+          path: ${{ runner.temp }}/vt-report/
