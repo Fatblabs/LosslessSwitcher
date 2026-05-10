@@ -14,6 +14,7 @@ env:
   XCODE_PROJECT: LosslessSwitcher.xcodeproj
   XCODE_SCHEME: LosslessSwitcher
   APP_NAME: LosslessSwitcher
+  MACOSX_DEPLOYMENT_TARGET: "15.0"
 
 jobs:
   build-and-release:
@@ -35,17 +36,17 @@ jobs:
           echo "Current directory:"
           pwd
 
-          echo "Repository files:"
-          ls -la
-
           echo "Git ref:"
           echo "$GITHUB_REF"
           echo "$GITHUB_REF_NAME"
 
+          echo "Repository files:"
+          ls -la
+
           echo "Finding Xcode projects:"
           find . -maxdepth 4 -name "*.xcodeproj" -print
 
-          echo "Checking configured project:"
+          echo "Checking project:"
           ls -la "$XCODE_PROJECT"
 
           echo "Checking project.pbxproj:"
@@ -69,11 +70,12 @@ jobs:
           VERSION="${TAG_NAME#v}"
           DERIVED_DATA_PATH="$RUNNER_TEMP/DerivedData"
 
-          echo "Building tag/name: $TAG_NAME"
+          echo "Building: $TAG_NAME"
           echo "Version: $VERSION"
           echo "Project: $XCODE_PROJECT"
           echo "Scheme: $XCODE_SCHEME"
           echo "Configuration: $CONFIGURATION"
+          echo "Deployment target: $MACOSX_DEPLOYMENT_TARGET"
 
           xcodebuild clean build \
             -project "$XCODE_PROJECT" \
@@ -83,7 +85,10 @@ jobs:
             -derivedDataPath "$DERIVED_DATA_PATH" \
             MARKETING_VERSION="$VERSION" \
             CURRENT_PROJECT_VERSION="${GITHUB_RUN_NUMBER}" \
-            CODE_SIGNING_ALLOWED=NO
+            MACOSX_DEPLOYMENT_TARGET="$MACOSX_DEPLOYMENT_TARGET" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY=""
 
           APP_PATH="$(find "$DERIVED_DATA_PATH/Build/Products/$CONFIGURATION" -maxdepth 1 -name "$APP_NAME.app" -type d | head -n 1)"
 
