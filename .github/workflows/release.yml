@@ -1,0 +1,45 @@
+name: Build, Scan, and Release
+
+on:
+  push:
+    tags:
+      - 'v*' # Triggers on v1.0, v2.1.4, etc.
+
+jobs:
+  release:
+    runs-on: macos-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # 1. Compile the code into a macOS .app bundle
+      - name: Build macOS App
+        run: |
+          xcodebuild -scheme "LosslessSwitcher" \
+                     -configuration Release \
+                     -derivedDataPath temp_build \
+                     build
+          
+          # Move to the build folder and zip the .app
+          cd temp_build/Build/Products/Release/
+          zip -r ../../../LosslessSwitcher.zip *.app
+
+      # 2. VirusTotal Scan
+      - name: VirusTotal Scan
+        uses: cssnr/virustotal-action@v1
+        with:
+          vt_api_key: ${{ secrets.VT_API_KEY }}
+          file_globs: "LosslessSwitcher.zip"
+
+      # 3. Create the GitHub Release and upload the scanned ZIP
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: LosslessSwitcher.zip
+          name: Release ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
