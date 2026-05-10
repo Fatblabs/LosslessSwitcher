@@ -8,133 +8,117 @@ on:
 permissions:
   contents: write
 
+env:
+  CONFIGURATION: Release
+  XCODE_PROJECT: LosslessSwitcher.xcodeproj
+  XCODE_SCHEME: LosslessSwitcher
+  APP_NAME: LosslessSwitcher
+
 jobs:
   build-and-release:
     name: Build macOS app and publish GitHub release
-    runs-on: macos-latest
-    timeout-minutes: 60
-
-    env:
-      CONFIGURATION: Release
-      XCODE_WORKSPACE: ""
-      XCODE_PROJECT: ""
-      XCODE_SCHEME: ""
-      APP_NAME: ""
+    runs-on: macos-15-arm64
 
     steps:
-      - name: Checkout tagged source
-        uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
           ref: ${{ github.ref }}
 
-      - name: Select Xcode project, workspace, and scheme
+      - name: Debug Xcode project
+        shell: bash
         run: |
           set -euo pipefail
 
-          if [ -n "$XCODE_WORKSPACE" ]; then
-            PROJECT_ARGS=(-workspace "$XCODE_WORKSPACE")
-          elif [ -n "$XCODE_PROJECT" ]; then
-            PROJECT_ARGS=(-project "$XCODE_PROJECT")
-          elif compgen -G "*.xcworkspace" > /dev/null; then
-            PROJECT_ARGS=(-workspace "$(ls -1 *.xcworkspace | head -n 1)")
-          elif compgen -G "*.xcodeproj" > /dev/null; then
-            PROJECT_ARGS=(-project "$(ls -1 *.xcodeproj | head -n 1)")
-          else
-            echo "::error::No .xcworkspace or .xcodeproj found in repository root. Set XCODE_WORKSPACE or XCODE_PROJECT in this workflow."
-            exit 1
-          fi
+          echo "Current directory:"
+          pwd
 
-          xcodebuild -list -json "${PROJECT_ARGS[@]}" > xcodebuild-list.json
+          echo "Repo root files:"
+          ls -la
 
-          SCHEME="$XCODE_SCHEME"
-          if [ -z "$SCHEME" ]; then
-            SCHEME=$(python3 <<'PY'
-          import json
-          with open("xcodebuild-list.json", "r", encoding="utf-8") as handle:
-              data = json.load(handle)
-          container = data.get("workspace") or data.get("project") or {}
-          schemes = container.get("schemes") or []
-          print(schemes[0] if schemes else "")
-          PY
-          )
-          fi
+          echo "Finding Xcode projects:"
+          find . -maxdepth 3 -name "*.xcodeproj" -print
 
-          if [ -z "$SCHEME" ]; then
-            echo "::error::No shared Xcode scheme found. Set XCODE_SCHEME in this workflow."
-            exit 1
-          fi
+          echo "Checking configured project:"
+          ls -la "$XCODE_PROJECT"
 
-          {
-            printf 'PROJECT_ARGS=(' 
-            printf '%q ' "${PROJECT_ARGS[@]}"
-            printf ')\n'
-            printf 'SCHEME=%q\n' "$SCHEME"
-          } > build-env.sh
-          echo "Using scheme: $SCHEME"
+          echo "Checking project.pbxproj:"
+          test -f "$XCODE_PROJECT/project.pbxproj"
+          ls -la "$XCODE_PROJECT/project.pbxproj"
 
-      - name: Build Release app
+          echo "Available schemes:"
+          xcodebuild -list -project "$XCODE_PROJECT"
+
+      - name: Build macOS app
+        shell: bash
         run: |
           set -euo pipefail
-          source build-env.sh
 
-          DERIVED_DATA="$PWD/DerivedData"
-          rm -rf "$DERIVED_DATA" dist
-          mkdir -p dist
+          TAG_NAME="${GITHUB_REF_NAME}"
+          VERSION="${TAG_NAME#v}"
+          DERIVED_DATA_PATH="$RUNNER_TEMP/DerivedData"
+
+          echo "Building tag: $TAG_NAME"
+          echo "App version: $VERSION"
+          echo "Project: $XCODE_PROJECT"
+          echo "Scheme: $XCODE_SCHEME"
 
           xcodebuild clean build \
-            "${PROJECT_ARGS[@]}" \
-            -scheme "$SCHEME" \
+            -project "$XCODE_PROJECT" \
+            -scheme "$XCODE_SCHEME" \
             -configuration "$CONFIGURATION" \
-            -derivedDataPath "$DERIVED_DATA" \
+            -destination "generic/platform=macOS" \
+            -derivedDataPath "$DERIVED_DATA_PATH" \
+            MARKETING_VERSION="$VERSION" \
+            CURRENT_PROJECT_VERSION="${GITHUB_RUN_NUMBER}" \
             CODE_SIGNING_ALLOWED=NO
 
-          SEARCH_ROOT="$DERIVED_DATA/Build/Products"
-          if [ -n "$APP_NAME" ]; then
-            APP_PATH=$(find "$SEARCH_ROOT" -type d -name "$APP_NAME.app" | sort | head -n 1)
-          else
-            APP_PATH=$(find "$SEARCH_ROOT" -type d -name "*.app" | sort | head -n 1)
-          fi
+          APP_PATH="$(find "$DERIVED_DATA_PATH/Build/Products/$CONFIGURATION" -maxdepth 1 -name "$APP_NAME.app" -type d | head -n 1)"
 
-          if [ -z "${APP_PATH:-}" ] || [ ! -d "$APP_PATH" ]; then
-            echo "::error::No built .app found under $SEARCH_ROOT. Set APP_NAME if your app name is not auto-detected."
-            find "$SEARCH_ROOT" -maxdepth 4 -print || true
+          if [ -z "$APP_PATH" ]; then
+            echo "::error::Could not find built app named $APP_NAME.app"
+            echo "Available .app bundles:"
+            find "$DERIVED_DATA_PATH/Build/Products" -name "*.app" -type d -print
             exit 1
           fi
 
-          APP_BASENAME=$(basename "$APP_PATH" .app)
-          SAFE_TAG=$(echo "${GITHUB_REF_NAME}" | tr '/:' '--')
-          ZIP_PATH="dist/${APP_BASENAME}-${SAFE_TAG}.zip"
+          echo "Built app path: $APP_PATH"
+
+          mkdir -p release
+
+          ZIP_NAME="${APP_NAME}-${TAG_NAME}-macOS.zip"
+          ZIP_PATH="release/$ZIP_NAME"
 
           ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" "$ZIP_PATH"
+
           shasum -a 256 "$ZIP_PATH" > "$ZIP_PATH.sha256"
 
-          echo "APP_BASENAME=$APP_BASENAME" >> "$GITHUB_ENV"
           echo "ZIP_PATH=$ZIP_PATH" >> "$GITHUB_ENV"
-          echo "Built app: $APP_PATH"
-          echo "Release asset: $ZIP_PATH"
+          echo "CHECKSUM_PATH=$ZIP_PATH.sha256" >> "$GITHUB_ENV"
+          echo "TAG_NAME=$TAG_NAME" >> "$GITHUB_ENV"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
 
       - name: Upload build artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
-          name: macos-app-${{ github.ref_name }}
-          path: dist/
+          name: ${{ env.APP_NAME }}-${{ env.TAG_NAME }}-macOS
+          path: |
+            ${{ env.ZIP_PATH }}
+            ${{ env.CHECKSUM_PATH }}
 
-      - name: Create GitHub release from tag
+      - name: Create GitHub release
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
 
-          cat > release-notes.md <<EOF
-          Automated macOS build for ${GITHUB_REF_NAME}.
+          RELEASE_TITLE="$APP_NAME $TAG_NAME"
 
-          Commit: ${GITHUB_SHA}
-          EOF
-
-          gh release create "${GITHUB_REF_NAME}" \
+          gh release create "$TAG_NAME" \
             "$ZIP_PATH" \
-            "$ZIP_PATH.sha256" \
-            --title "${GITHUB_REF_NAME}" \
-            --notes-file release-notes.md \
+            "$CHECKSUM_PATH" \
+            --title "$RELEASE_TITLE" \
+            --notes "Automated macOS build for $APP_NAME $TAG_NAME." \
             --verify-tag
