@@ -1,6 +1,7 @@
 name: Build and Release macOS App
 
 on:
+  workflow_dispatch:
   push:
     tags:
       - "v*"
@@ -60,10 +61,15 @@ jobs:
           set -euo pipefail
 
           TAG_NAME="${GITHUB_REF_NAME}"
+
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            TAG_NAME="manual-build-${GITHUB_RUN_NUMBER}"
+          fi
+
           VERSION="${TAG_NAME#v}"
           DERIVED_DATA_PATH="$RUNNER_TEMP/DerivedData"
 
-          echo "Building tag: $TAG_NAME"
+          echo "Building tag/name: $TAG_NAME"
           echo "Version: $VERSION"
           echo "Project: $XCODE_PROJECT"
           echo "Scheme: $XCODE_SCHEME"
@@ -108,12 +114,13 @@ jobs:
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v6
         with:
-          name: ${{ env.APP_NAME }}-${{ env.TAG_NAME }}-macOS
+          name: LosslessSwitcher-macOS-build
           path: |
             ${{ env.ZIP_PATH }}
             ${{ env.CHECKSUM_PATH }}
 
       - name: Create or update GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
