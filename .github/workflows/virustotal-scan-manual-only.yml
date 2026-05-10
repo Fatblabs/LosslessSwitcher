@@ -1,0 +1,317 @@
+name: VirusTotal File Scan
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    name: Scan repository files with VirusTotal
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    env:
+      VT_API_KEY: ${{ secrets.VT_API_KEY }}
+      VT_REQUEST_DELAY_SECONDS: "20"
+      VT_POLL_DELAY_SECONDS: "30"
+      VT_POLL_ATTEMPTS: "5"
+      VT_MAX_FILE_SIZE_MB: "650"
+      VT_FAIL_ON_DETECTION: "true"
+      VT_FAIL_ON_ERROR: "true"
+      VT_FAIL_ON_INCOMPLETE: "false"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Python dependency
+        run: python3 -m pip install --disable-pip-version-check requests
+
+      - name: Scan files and create report
+        run: |
+          python3 <<'PY'
+          import csv
+          import hashlib
+          import json
+          import os
+          import pathlib
+          import sys
+          import time
+          from typing import Dict, List
+
+          import requests
+
+          API_BASE = "https://www.virustotal.com/api/v3"
+          SMALL_FILE_LIMIT = 32 * 1024 * 1024
+
+          api_key = os.environ.get("VT_API_KEY", "").strip()
+          if not api_key:
+              print("::error::Missing GitHub secret VT_API_KEY")
+              sys.exit(2)
+
+          request_delay = int(os.environ.get("VT_REQUEST_DELAY_SECONDS", "20"))
+          poll_delay = int(os.environ.get("VT_POLL_DELAY_SECONDS", "30"))
+          poll_attempts = int(os.environ.get("VT_POLL_ATTEMPTS", "5"))
+          max_file_size = int(os.environ.get("VT_MAX_FILE_SIZE_MB", "650")) * 1024 * 1024
+          fail_on_detection = os.environ.get("VT_FAIL_ON_DETECTION", "true").lower() == "true"
+          fail_on_error = os.environ.get("VT_FAIL_ON_ERROR", "true").lower() == "true"
+          fail_on_incomplete = os.environ.get("VT_FAIL_ON_INCOMPLETE", "false").lower() == "true"
+
+          headers = {"x-apikey": api_key}
+          last_request_at = 0.0
+
+          def wait_for_rate_limit():
+              global last_request_at
+              elapsed = time.time() - last_request_at
+              remaining = request_delay - elapsed
+              if remaining > 0:
+                  time.sleep(remaining)
+
+          def vt_request(method: str, url: str, **kwargs) -> requests.Response:
+              global last_request_at
+              last_error = None
+              for attempt in range(1, 6):
+                  wait_for_rate_limit()
+                  response = requests.request(method, url, timeout=300, **kwargs)
+                  last_request_at = time.time()
+
+                  if response.status_code == 429:
+                      retry_after = response.headers.get("Retry-After")
+                      sleep_for = int(retry_after) if retry_after and retry_after.isdigit() else max(60, request_delay * attempt)
+                      print(f"Rate limited by VirusTotal. Waiting {sleep_for} seconds before retrying...")
+                      time.sleep(sleep_for)
+                      last_error = response
+                      continue
+
+                  if 500 <= response.status_code < 600:
+                      sleep_for = min(120, max(30, request_delay * attempt))
+                      print(f"VirusTotal server error {response.status_code}. Waiting {sleep_for} seconds before retrying...")
+                      time.sleep(sleep_for)
+                      last_error = response
+                      continue
+
+                  response.raise_for_status()
+                  return response
+
+              if last_error is not None:
+                  last_error.raise_for_status()
+              raise RuntimeError("VirusTotal request failed after retries")
+
+          def sha256_file(path: pathlib.Path) -> str:
+              digest = hashlib.sha256()
+              with path.open("rb") as handle:
+                  for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                      digest.update(chunk)
+              return digest.hexdigest()
+
+          def upload_file(path: pathlib.Path, size: int) -> str:
+              if size > SMALL_FILE_LIMIT:
+                  upload_url_response = vt_request("GET", f"{API_BASE}/files/upload_url", headers=headers)
+                  upload_url = upload_url_response.json()["data"]
+              else:
+                  upload_url = f"{API_BASE}/files"
+
+              with path.open("rb") as handle:
+                  response = vt_request(
+                      "POST",
+                      upload_url,
+                      headers=headers,
+                      files={"file": (path.name, handle)},
+                  )
+              return response.json()["data"]["id"]
+
+          def fetch_analysis(analysis_id: str) -> Dict:
+              for attempt in range(1, poll_attempts + 1):
+                  time.sleep(poll_delay)
+                  response = vt_request("GET", f"{API_BASE}/analyses/{analysis_id}", headers=headers)
+                  data = response.json().get("data", {})
+                  attrs = data.get("attributes", {})
+                  if attrs.get("status") == "completed" or attempt == poll_attempts:
+                      return attrs
+              return {}
+
+          def collect_files() -> List[pathlib.Path]:
+              root = pathlib.Path(".").resolve()
+              excluded_dirs = {".git", "vt-scan-results"}
+              files = []
+              for current_root, dirs, filenames in os.walk(root):
+                  dirs[:] = [d for d in dirs if d not in excluded_dirs]
+                  for filename in filenames:
+                      path = pathlib.Path(current_root) / filename
+                      rel = path.relative_to(root)
+                      if path.is_symlink():
+                          continue
+                      files.append(rel)
+              return sorted(files, key=lambda p: str(p).lower())
+
+          results_dir = pathlib.Path("vt-scan-results")
+          results_dir.mkdir(exist_ok=True)
+
+          rows = []
+          skipped_rows = []
+          files = collect_files()
+          print(f"Found {len(files)} files to evaluate.")
+
+          for index, rel_path in enumerate(files, start=1):
+              path = pathlib.Path(rel_path)
+              try:
+                  size = path.stat().st_size
+                  digest = sha256_file(path)
+
+                  if size == 0:
+                      skipped_rows.append({
+                          "path": str(rel_path),
+                          "size_bytes": size,
+                          "sha256": digest,
+                          "reason": "empty_file",
+                      })
+                      continue
+
+                  if size > max_file_size:
+                      skipped_rows.append({
+                          "path": str(rel_path),
+                          "size_bytes": size,
+                          "sha256": digest,
+                          "reason": f"larger_than_{max_file_size}_bytes",
+                      })
+                      continue
+
+                  print(f"[{index}/{len(files)}] Uploading and scanning: {rel_path}")
+                  analysis_id = upload_file(path, size)
+                  attrs = fetch_analysis(analysis_id)
+                  stats = attrs.get("stats", {}) or {}
+                  status = attrs.get("status", "unknown")
+
+                  malicious = int(stats.get("malicious", 0) or 0)
+                  suspicious = int(stats.get("suspicious", 0) or 0)
+                  verdict = "clean"
+                  if malicious or suspicious:
+                      verdict = "flagged"
+                  elif status != "completed":
+                      verdict = "incomplete"
+
+                  rows.append({
+                      "path": str(rel_path),
+                      "size_bytes": size,
+                      "sha256": digest,
+                      "analysis_id": analysis_id,
+                      "status": status,
+                      "malicious": malicious,
+                      "suspicious": suspicious,
+                      "harmless": int(stats.get("harmless", 0) or 0),
+                      "undetected": int(stats.get("undetected", 0) or 0),
+                      "timeout": int(stats.get("timeout", 0) or 0),
+                      "verdict": verdict,
+                  })
+              except Exception as exc:
+                  print(f"::error file={rel_path}::VirusTotal scan failed: {exc}")
+                  rows.append({
+                      "path": str(rel_path),
+                      "size_bytes": path.stat().st_size if path.exists() else "",
+                      "sha256": "",
+                      "analysis_id": "",
+                      "status": "error",
+                      "malicious": 0,
+                      "suspicious": 0,
+                      "harmless": 0,
+                      "undetected": 0,
+                      "timeout": 0,
+                      "verdict": "error",
+                  })
+
+          csv_path = results_dir / "virustotal-scanned-files.csv"
+          json_path = results_dir / "virustotal-scanned-files.json"
+          skipped_csv_path = results_dir / "virustotal-skipped-files.csv"
+          md_path = results_dir / "virustotal-summary.md"
+
+          fieldnames = [
+              "path", "size_bytes", "sha256", "analysis_id", "status",
+              "malicious", "suspicious", "harmless", "undetected", "timeout", "verdict"
+          ]
+          with csv_path.open("w", newline="", encoding="utf-8") as handle:
+              writer = csv.DictWriter(handle, fieldnames=fieldnames)
+              writer.writeheader()
+              writer.writerows(rows)
+
+          with json_path.open("w", encoding="utf-8") as handle:
+              json.dump(rows, handle, indent=2)
+
+          with skipped_csv_path.open("w", newline="", encoding="utf-8") as handle:
+              writer = csv.DictWriter(handle, fieldnames=["path", "size_bytes", "sha256", "reason"])
+              writer.writeheader()
+              writer.writerows(skipped_rows)
+
+          flagged = [row for row in rows if row["verdict"] == "flagged"]
+          errors = [row for row in rows if row["verdict"] == "error"]
+          incomplete = [row for row in rows if row["verdict"] == "incomplete"]
+          clean = [row for row in rows if row["verdict"] == "clean"]
+
+          summary = []
+          summary.append("# VirusTotal Scan Summary")
+          summary.append("")
+          summary.append(f"- Scanned files: {len(rows)}")
+          summary.append(f"- Clean files: {len(clean)}")
+          summary.append(f"- Flagged files: {len(flagged)}")
+          summary.append(f"- Error files: {len(errors)}")
+          summary.append(f"- Incomplete files: {len(incomplete)}")
+          summary.append(f"- Skipped files: {len(skipped_rows)}")
+          summary.append("")
+          summary.append("## Report files")
+          summary.append("")
+          summary.append(f"- `{csv_path}`")
+          summary.append(f"- `{json_path}`")
+          summary.append(f"- `{skipped_csv_path}`")
+          summary.append("")
+
+          if flagged:
+              summary.append("## Flagged files")
+              summary.append("")
+              for row in flagged:
+                  summary.append(f"- `{row['path']}` — malicious={row['malicious']}, suspicious={row['suspicious']}, analysis_id={row['analysis_id']}")
+              summary.append("")
+
+          if errors:
+              summary.append("## Files with scan errors")
+              summary.append("")
+              for row in errors:
+                  summary.append(f"- `{row['path']}`")
+              summary.append("")
+
+          if incomplete:
+              summary.append("## Files whose analysis was still incomplete")
+              summary.append("")
+              for row in incomplete:
+                  summary.append(f"- `{row['path']}` — analysis_id={row['analysis_id']}")
+              summary.append("")
+
+          md_text = "\n".join(summary)
+          md_path.write_text(md_text, encoding="utf-8")
+
+          github_summary = os.environ.get("GITHUB_STEP_SUMMARY")
+          if github_summary:
+              with open(github_summary, "a", encoding="utf-8") as handle:
+                  handle.write(md_text + "\n")
+
+          should_fail = False
+          if fail_on_detection and flagged:
+              should_fail = True
+          if fail_on_error and errors:
+              should_fail = True
+          if fail_on_incomplete and incomplete:
+              should_fail = True
+
+          if should_fail:
+              print("::error::VirusTotal scan completed, but the result policy failed. See vt-scan-results artifacts.")
+              sys.exit(1)
+
+          print("VirusTotal scan completed. Reports are in vt-scan-results/.")
+          PY
+
+      - name: Upload VirusTotal scan reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: virustotal-scan-report
+          path: vt-scan-results/
