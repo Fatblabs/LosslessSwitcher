@@ -1,23 +1,25 @@
 name: VirusTotal Scan
 
 on:
-  workflow_dispatch: # Allows manual trigger from the GitHub Actions tab
+  workflow_dispatch: # Allows you to trigger this manually from the Actions tab
 
 jobs:
   test-scan:
     runs-on: ubuntu-latest
     env:
+      # Ensures compatibility with the latest Ubuntu runners
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # Ensures the directories and files exist
-      - name: Prepare Build Artifacts
+      - name: Prepare Unique Build Artifacts
         run: |
           mkdir -p dist build
-          echo "test data" > dist/app.zip
-          echo "test data" > build/app.exe
+          # We add the run_id so the file content (and hash) is different every time you run it.
+          # This prevents VirusTotal from throwing a 409 Conflict error.
+          echo "Unique build for run ${{ github.run_id }}" > dist/app.zip
+          echo "Unique executable for run ${{ github.run_id }}" > build/app.exe
 
       - name: VirusTotal Scan
         uses: cssnr/virustotal-action@v1
@@ -31,13 +33,17 @@ jobs:
             dist/*.zip
             build/*.exe
 
-      - name: Display Test Result
+      - name: Display Scan Results
         if: always()
         run: |
           echo "### 🛡️ VirusTotal Scan Summary" >> $GITHUB_STEP_SUMMARY
           if [ "${{ steps.vt.outcome }}" == "success" ]; then
-            echo "Analysis Link(s):" >> $GITHUB_STEP_SUMMARY
-            echo "${{ steps.vt.outputs.results }}" | tr ',' '\n' | sed 's/^/ - /' >> $GITHUB_STEP_SUMMARY
+            echo "✅ Scan submitted successfully." >> $GITHUB_STEP_SUMMARY
+            echo "Check the VirusTotal dashboard or the 'VirusTotal Scan' step logs for direct analysis links." >> $GITHUB_STEP_SUMMARY
           else
-            echo "⚠️ Scan skipped or file already submitted (409 Conflict)." >> $GITHUB_STEP_SUMMARY
+            echo "⚠️ The scan step did not complete successfully." >> $GITHUB_STEP_SUMMARY
+            echo "Possible reasons:" >> $GITHUB_STEP_SUMMARY
+            echo "- **409 Conflict:** The file hash already exists or is being processed." >> $GITHUB_STEP_SUMMARY
+            echo "- **Rate Limit:** Standard VT API keys are limited to 4 requests per minute." >> $GITHUB_STEP_SUMMARY
+            echo "- **Secret Error:** Ensure 'VT_API_KEY' is correctly set in your Repo Secrets." >> $GITHUB_STEP_SUMMARY
           fi
