@@ -1,19 +1,18 @@
 name: VirusTotal Scan
+
 on:
-  workflow_dispatch: # Allows manual trigger
-  push:
-    branches: [ main ] # Runs when code is pushed to main
+  workflow_dispatch: # Allows manual trigger from the GitHub Actions tab
 
 jobs:
   test-scan:
     runs-on: ubuntu-latest
     env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true # Ensures compatibility with Node.js 24
+      [cite_start]FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true # Ensures compatibility with Node.js 24 [cite: 9]
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        [cite_start]uses: actions/checkout@v4 [cite: 1]
 
-      # FIX: Create the directories and dummy files so the action finds something to scan
+      # This ensures the directories and files exist so the action doesn't fail with "No files to process"
       - name: Prepare Build Artifacts
         run: |
           mkdir -p dist build
@@ -21,19 +20,19 @@ jobs:
           echo "test data" > build/app.exe
 
       - name: VirusTotal Scan
-        uses: cssnr/virustotal-action@v1
+        [cite_start]uses: cssnr/virustotal-action@v1 [cite: 9]
         id: vt
-        continue-on-error: true # FIX: Prevents job failure if file is already submitted
+        continue-on-error: true # FIX: Prevents job failure if a file is already in the VT queue (409 Conflict)
         with:
-          vt_api_key: ${{ secrets.VT_API_KEY }}
-          rate_limit: 4
-          summary: true
+          [cite_start]vt_api_key: ${{ secrets.VT_API_KEY }} [cite: 9]
+          [cite_start]rate_limit: 4 [cite: 9]
+          [cite_start]summary: true [cite: 9]
           file_globs: |
             dist/*.zip
             build/*.exe
 
       - name: Display Test Result
-        if: always() # Ensures this runs even if the scan step has a conflict
+        [cite_start]if: always() # Ensures results or warnings are shown even if the scan step has issues [cite: 12]
         run: |
           echo "### 🛡️ VirusTotal Scan Summary" >> $GITHUB_STEP_SUMMARY
           if [ "${{ steps.vt.outcome }}" == "success" ]; then
@@ -41,4 +40,4 @@ jobs:
             echo "${{ steps.vt.outputs.results }}" | sed 's/,/\n/g' | sed 's/^/ - /' >> $GITHUB_STEP_SUMMARY
           else
             echo "⚠️ Scan skipped or file already submitted (409 Conflict)." >> $GITHUB_STEP_SUMMARY
-          fi
+          fi [cite: 12, 13, 14, 15]
