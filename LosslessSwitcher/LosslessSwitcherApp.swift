@@ -160,7 +160,7 @@ enum MainWindowPresenter {
         let hostingController = NSHostingController(rootView: contentView)
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 860, height: 700),
+            contentRect: NSRect(x: 0, y: 0, width: 980, height: 760),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
@@ -169,7 +169,7 @@ enum MainWindowPresenter {
         window.isRestorable = false
         window.restorationClass = nil
         window.disableSnapshotRestoration()
-        window.minSize = NSSize(width: 760, height: 620)
+        window.minSize = NSSize(width: 860, height: 680)
         window.contentViewController = hostingController
         window.isReleasedWhenClosed = false
         let delegate = MainWindowDelegate()
