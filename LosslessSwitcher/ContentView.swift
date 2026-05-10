@@ -95,14 +95,10 @@ struct ContentView: View {
                     }
 
                     HStack {
-                        Button("Match Now") {
-                            controller.matchCurrentTrackNow()
-                        }
+                        Button("Match Now", action: controller.matchCurrentTrackNow)
                         .buttonStyle(.borderedProminent)
 
-                        Button("Open Music") {
-                            controller.openMusic()
-                        }
+                        Button("Open Music", action: controller.openMusic)
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -163,7 +159,6 @@ struct ContentView: View {
     private var settingsSection: some View {
         GroupBox("Settings") {
             SettingsControlsView()
-                .environmentObject(controller)
                 .padding(.vertical, 4)
         }
     }
@@ -206,13 +201,8 @@ struct ContentView: View {
 
     private var footer: some View {
         HStack {
-            Button("Refresh Devices") {
-                controller.refreshDevices()
-            }
-
-            Button("Request Music Access") {
-                controller.requestMusicAccess()
-            }
+            Button("Refresh Devices", action: controller.refreshDevices)
+            Button("Request Music Access", action: controller.requestMusicAccess)
 
             Spacer()
 
@@ -246,9 +236,7 @@ struct SettingsControlsView: View {
             }
 
             GridRow {
-                Button("Clear Song Memory") {
-                    controller.clearFormatCache()
-                }
+                Button("Clear Song Memory", action: controller.clearFormatCache)
                 .disabled(controller.cachedTrackCount == 0)
 
                 Text("Cached song formats survive app restarts.")
@@ -269,7 +257,6 @@ struct SettingsView: View {
                 .font(.title3.weight(.semibold))
 
             SettingsControlsView()
-                .environmentObject(controller)
 
             Divider()
 
@@ -283,6 +270,7 @@ struct SettingsView: View {
 
 struct MenuBarView: View {
     @EnvironmentObject private var controller: LosslessSwitcherController
+    @Environment(\.openSettings) private var openSettings
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -338,9 +326,7 @@ struct MenuBarView: View {
             .pickerStyle(.segmented)
 
             HStack {
-                Button("Match Now") {
-                    controller.matchCurrentTrackNow()
-                }
+                Button("Match Now", action: controller.matchCurrentTrackNow)
                 .buttonStyle(.borderedProminent)
 
                 Button("Open") {
@@ -351,28 +337,24 @@ struct MenuBarView: View {
             Divider()
 
             SettingsControlsView()
-                .environmentObject(controller)
 
             HStack {
-                Button("Settings") {
-                    NSApplication.shared.sendAction(
-                        Selector(("showSettingsWindow:")),
-                        to: nil,
-                        from: nil
-                    )
-                }
-
+                Button("Settings", action: showSettings)
                 Spacer()
             }
 
             Divider()
 
-            Button("Quit") {
-                NSApplication.shared.terminate(nil)
-            }
+            Button("Quit") { NSApplication.shared.terminate(nil) }
         }
         .padding(14)
         .frame(width: 390)
+    }
+
+    private func showSettings() {
+        NSApplication.shared.setActivationPolicy(.regular)
+        NSApplication.shared.activate(ignoringOtherApps: true)
+        openSettings()
     }
 }
 

@@ -4,13 +4,14 @@ nonisolated final class LiveConsoleAudioFormatMonitor: @unchecked Sendable {
     var onFormat: (@Sendable (DetectedAudioFormat) -> Void)?
     var onError: (@Sendable (String) -> Void)?
 
-    private let queue = DispatchQueue(label: "LosslessSwitcher.LiveConsoleAudioFormatMonitor", qos: .userInitiated)
+    private let queue = DispatchQueue(label: "LosslessSwitcher.LiveConsoleAudioFormatMonitor", qos: .utility)
     private var process: Process?
     private var outputPipe: Pipe?
     private var errorPipe: Pipe?
     private var buffer = Data()
     private var lastFormatSignature: String?
     private var lastError: String?
+    private var isStopping = false
 
     func start() {
         queue.async { [weak self] in
@@ -29,6 +30,7 @@ nonisolated final class LiveConsoleAudioFormatMonitor: @unchecked Sendable {
             return
         }
 
+        isStopping = false
         let outputPipe = Pipe()
         let errorPipe = Pipe()
         let process = Process()
@@ -41,7 +43,7 @@ nonisolated final class LiveConsoleAudioFormatMonitor: @unchecked Sendable {
             "info",
             "--predicate",
             """
-            (process == "Music") AND ((subsystem == "com.apple.coreaudio") OR (subsystem == "com.apple.coremedia") OR (subsystem == "com.apple.Music"))
+            (process == "Music") AND (subsystem == "com.apple.coreaudio") AND (eventMessage CONTAINS[c] "ACAppleLosslessDecoder.cpp") AND (eventMessage CONTAINS[c] "Input format:")
             """
         ]
         process.standardOutput = outputPipe
@@ -67,9 +69,11 @@ nonisolated final class LiveConsoleAudioFormatMonitor: @unchecked Sendable {
                 self?.outputPipe = nil
                 self?.errorPipe = nil
 
-                if process.terminationStatus != 0 {
+                if self?.isStopping == false, process.terminationStatus != 0 {
                     self?.reportError("Live log monitor exited with status \(process.terminationStatus)")
                 }
+
+                self?.isStopping = false
             }
         }
 
@@ -84,6 +88,11 @@ nonisolated final class LiveConsoleAudioFormatMonitor: @unchecked Sendable {
     }
 
     private func stopLocked() {
+        guard process != nil else {
+            return
+        }
+
+        isStopping = true
         outputPipe?.fileHandleForReading.readabilityHandler = nil
         errorPipe?.fileHandleForReading.readabilityHandler = nil
         process?.terminate()

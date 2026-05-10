@@ -9,6 +9,7 @@ final class LosslessSwitcherController: NSObject, ObservableObject {
     @Published var isAutoSwitchEnabled: Bool {
         didSet {
             UserDefaults.standard.set(isAutoSwitchEnabled, forKey: Defaults.autoSwitchEnabled)
+            syncLiveFormatMonitor()
             if isAutoSwitchEnabled {
                 matchCurrentTrackNow()
             }
@@ -44,7 +45,6 @@ final class LosslessSwitcherController: NSObject, ObservableObject {
         }
     }
 
-    @Published private(set) var devices: [AudioDevice] = []
     @Published private(set) var defaultOutputDevice: AudioDevice?
     @Published private(set) var currentSource: DetectedAudioSource?
     @Published private(set) var detectorStatus = "Waiting"
@@ -61,6 +61,7 @@ final class LosslessSwitcherController: NSObject, ObservableObject {
     }
 
     private let audioManager = CoreAudioDeviceManager()
+    private let musicDetector = MusicSourceDetector()
     private let formatCache = TrackFormatCache()
     private let liveFormatMonitor = LiveConsoleAudioFormatMonitor()
     private let detectionQueue = DispatchQueue(label: "LosslessSwitcher.MusicDetection", qos: .userInitiated)
@@ -73,6 +74,20 @@ final class LosslessSwitcherController: NSObject, ObservableObject {
     private var lastLiveFormat: DetectedAudioFormat?
     private var lastLiveFormatDate: Date?
     private var lastLiveFormatLogSignature: String?
+    private var lastDeviceRefreshDate = Date.distantPast
+    private var lastHistoricalScanDate = Date.distantPast
+    private var lastInactiveDetectionDate = Date.distantPast
+    private var lastObservedTrackChangeDate = Date.distantPast
+    private var isMusicPlaybackActive = false
+    private var workspaceObservers: [NSObjectProtocol] = []
+    private var distributedObservers: [NSObjectProtocol] = []
+    private var pendingImmediateDetection: DispatchWorkItem?
+
+    private let playbackPollInterval: TimeInterval = 2
+    private let inactiveDetectionInterval: TimeInterval = 8
+    private let deviceRefreshInterval: TimeInterval = 20
+    private let historicalScanInterval: TimeInterval = 20
+    private let midTrackDownshiftProtectionDelay: TimeInterval = 8
 
     private struct DetectionSnapshot: Sendable {
         let musicResult: MusicDetectionResult
@@ -107,9 +122,10 @@ final class LosslessSwitcherController: NSObject, ObservableObject {
         cachedTrackCount = formatCache.count
         refreshLaunchAtLoginStatus()
         configureLiveFormatMonitor()
+        configureMusicNotifications()
         refreshDevices()
         startMonitoring()
-        liveFormatMonitor.start()
+        syncLiveFormatMonitor()
     }
 
     private static func boolDefault(
@@ -122,6 +138,13 @@ final class LosslessSwitcherController: NSObject, ObservableObject {
 
     deinit {
         timer?.invalidate()
+        pendingImmediateDetection?.cancel()
+        workspaceObservers.forEach {
+            NSWorkspace.shared.notificationCenter.removeObserver($0)
+        }
+        distributedObservers.forEach {
+            DistributedNotificationCenter.default().removeObserver($0)
+        }
         liveFormatMonitor.stop()
     }
 
@@ -152,13 +175,21 @@ final class LosslessSwitcherController: NSObject, ObservableObject {
     }
 
     func refreshDevices() {
+        lastDeviceRefreshDate = Date()
         do {
-            devices = try audioManager.outputDevices()
-            defaultOutputDevice = devices.first(where: \.isDefaultOutput)
+            defaultOutputDevice = try audioManager.outputDevices().first(where: \.isDefaultOutput)
         } catch {
             lastSwitchStatus = error.localizedDescription
             appendLog(title: "Device Refresh Failed", detail: error.localizedDescription, isError: true)
         }
+    }
+
+    func refreshDevicesIfStale() {
+        guard Date().timeIntervalSince(lastDeviceRefreshDate) >= deviceRefreshInterval else {
+            return
+        }
+
+        refreshDevices()
     }
 
     func requestMusicAccess() {
@@ -239,7 +270,7 @@ final class LosslessSwitcherController: NSObject, ObservableObject {
 
     private func startMonitoring() {
         let timer = Timer(
-            timeInterval: 0.75,
+            timeInterval: playbackPollInterval,
             target: self,
             selector: #selector(pollTimerFired(_:)),
             userInfo: nil,
@@ -250,7 +281,17 @@ final class LosslessSwitcherController: NSObject, ObservableObject {
     }
 
     @objc private func pollTimerFired(_ timer: Timer) {
-        refreshDevices()
+        refreshDevicesIfStale()
+        syncLiveFormatMonitor()
+
+        if !isMusicPlaybackActive {
+            let now = Date()
+            guard now.timeIntervalSince(lastInactiveDetectionDate) >= inactiveDetectionInterval else {
+                return
+            }
+            lastInactiveDetectionDate = now
+        }
+
         detectMusic(forceSwitch: false)
     }
 
@@ -260,10 +301,11 @@ final class LosslessSwitcherController: NSObject, ObservableObject {
         }
 
         isDetectionInFlight = true
-        let shouldScanHistoricalLogs = forceSwitch || shouldScanHistoricalLogsForFallback
+        let shouldScanHistoricalLogs = shouldScanHistoricalLogs(forceSwitch: forceSwitch)
+        let detector = musicDetector
 
         detectionQueue.async { [weak self] in
-            let musicResult = MusicSourceDetector().detect()
+            let musicResult = detector.detect()
             var consoleFormat: DetectedAudioFormat?
             var consoleError: String?
 
@@ -302,9 +344,92 @@ final class LosslessSwitcherController: NSObject, ObservableObject {
         }
     }
 
+    private func configureMusicNotifications() {
+        let workspaceCenter = NSWorkspace.shared.notificationCenter
+        let launchObserver = workspaceCenter.addObserver(
+            forName: NSWorkspace.didLaunchApplicationNotification,
+            object: NSWorkspace.shared,
+            queue: .main
+        ) { notification in
+            let bundleIdentifier = Self.notificationApplicationBundleIdentifier(notification)
+            guard bundleIdentifier == "com.apple.Music" else {
+                return
+            }
+
+            Task { @MainActor [weak self] in
+                self?.scheduleImmediateDetection(forceSwitch: false)
+            }
+        }
+
+        let terminateObserver = workspaceCenter.addObserver(
+            forName: NSWorkspace.didTerminateApplicationNotification,
+            object: NSWorkspace.shared,
+            queue: .main
+        ) { notification in
+            let bundleIdentifier = Self.notificationApplicationBundleIdentifier(notification)
+            guard bundleIdentifier == "com.apple.Music" else {
+                return
+            }
+
+            Task { @MainActor [weak self] in
+                self?.clearPlaybackState(status: "Music is not running")
+                self?.liveFormatMonitor.stop()
+            }
+        }
+
+        workspaceObservers = [launchObserver, terminateObserver]
+
+        let distributedCenter = DistributedNotificationCenter.default()
+        let playerInfoNames = [
+            Notification.Name("com.apple.Music.playerInfo"),
+            Notification.Name("com.apple.iTunes.playerInfo")
+        ]
+
+        distributedObservers = playerInfoNames.map { name in
+            distributedCenter.addObserver(
+                forName: name,
+                object: nil,
+                queue: .main
+            ) { _ in
+                Task { @MainActor [weak self] in
+                    self?.scheduleImmediateDetection(forceSwitch: false)
+                }
+            }
+        }
+    }
+
+    nonisolated private static func notificationApplicationBundleIdentifier(_ notification: Notification) -> String? {
+        (notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication)?.bundleIdentifier
+    }
+
+    private func scheduleImmediateDetection(forceSwitch: Bool) {
+        pendingImmediateDetection?.cancel()
+
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.detectMusic(forceSwitch: forceSwitch)
+        }
+        pendingImmediateDetection = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08, execute: workItem)
+    }
+
+    private func syncLiveFormatMonitor() {
+        guard isAutoSwitchEnabled, musicDetector.isMusicRunning, isMusicPlaybackActive else {
+            liveFormatMonitor.stop()
+            return
+        }
+
+        liveFormatMonitor.start()
+    }
+
     private func handleLiveFormat(_ format: DetectedAudioFormat) {
         lastLiveFormat = format
         lastLiveFormatDate = format.date
+
+        if let source = currentSource,
+           !shouldUseLiveFormat(format, for: source, detectedAt: format.date, wasExistingTrack: true, isFirstObservedTrack: false) {
+            return
+        }
+
         maybeLogLiveFormat(format)
 
         if let source = currentSource {
@@ -330,6 +455,8 @@ final class LosslessSwitcherController: NSObject, ObservableObject {
     private func handle(_ snapshot: DetectionSnapshot, forceSwitch: Bool) {
         switch snapshot.musicResult {
         case .playing(let source):
+            isMusicPlaybackActive = true
+            syncLiveFormatMonitor()
             let resolvedSource = sourceWithBestAvailableFormat(from: source, snapshot: snapshot)
             currentSource = resolvedSource
             detectorStatus = "\(resolvedSource.appName) \(formatLabel(sampleRate: resolvedSource.sampleRate, bitDepth: resolvedSource.bitDepth))"
@@ -342,22 +469,26 @@ final class LosslessSwitcherController: NSObject, ObservableObject {
             }
 
         case .inactive(let status):
-            currentSource = nil
-            detectorStatus = status
-            lastObservedSourceSignature = nil
-            lastObservedTrackIdentity = nil
+            clearPlaybackState(status: status)
+            syncLiveFormatMonitor()
 
         case .failed(let message):
-            currentSource = nil
-            lastObservedSourceSignature = nil
-            lastObservedTrackIdentity = nil
+            clearPlaybackState(status: message)
+            syncLiveFormatMonitor()
             if message == "Music is not running" {
-                detectorStatus = message
+                return
             } else {
-                detectorStatus = message
                 appendLog(title: "Detector Failed", detail: message, isError: true)
             }
         }
+    }
+
+    private func clearPlaybackState(status: String) {
+        isMusicPlaybackActive = false
+        currentSource = nil
+        detectorStatus = status
+        lastObservedSourceSignature = nil
+        lastObservedTrackIdentity = nil
     }
 
     private func sourceWithBestAvailableFormat(
@@ -370,121 +501,143 @@ final class LosslessSwitcherController: NSObject, ObservableObject {
 
         if !wasExistingTrack {
             lastObservedTrackIdentity = trackIdentity
+            lastObservedTrackChangeDate = snapshot.detectedAt
             lastAppliedSignature = nil
         }
 
-        if let consoleFormat = snapshot.consoleFormat ?? recentLiveFormat(at: snapshot.detectedAt) {
-            let maximumAge: TimeInterval = wasExistingTrack || isFirstObservedTrack ? 8 : 3
-            if snapshot.detectedAt.timeIntervalSince(consoleFormat.date) <= maximumAge {
-                return source.withConsoleFormat(consoleFormat)
-            }
+        if let consoleFormat = snapshot.consoleFormat,
+           shouldUseLiveFormat(
+            consoleFormat,
+            for: source,
+            detectedAt: snapshot.detectedAt,
+            wasExistingTrack: wasExistingTrack,
+            isFirstObservedTrack: isFirstObservedTrack
+           ) {
+            return source.withConsoleFormat(consoleFormat)
         }
 
         if let cachedFormat = formatCache.format(for: source) {
             return source.withConsoleFormat(cachedFormat)
         }
 
+        if let liveFormat = recentLiveFormat(at: snapshot.detectedAt),
+           shouldUseLiveFormat(
+            liveFormat,
+            for: source,
+            detectedAt: snapshot.detectedAt,
+            wasExistingTrack: wasExistingTrack,
+            isFirstObservedTrack: isFirstObservedTrack
+           ) {
+            return source.withConsoleFormat(liveFormat)
+        }
+
         return source
     }
 
     private func switchTo(source: DetectedAudioSource, force: Bool) {
-        guard let defaultOutputDevice else {
-            lastSwitchStatus = "No default output device"
-            return
-        }
-
         let targetBitDepth = targetBitDepth(for: source)
-        let reliability = source.isSampleRateReliable ? "reliable" : "unreliable"
-        let signature = formatSignature(
-            device: defaultOutputDevice,
+        let context = switchContext(
             sampleRate: source.sampleRate,
             bitDepth: targetBitDepth,
-            reliability: reliability
+            reliability: source.isSampleRateReliable ? "reliable" : "unreliable",
+            force: force
         )
-        guard force || signature != lastAppliedSignature else {
+        guard let context else {
             return
         }
 
         if !force && !source.isSampleRateReliable {
-            lastAppliedSignature = signature
+            lastAppliedSignature = context.signature
             let detail = source.sampleRateNote ?? "Music did not expose a reliable stream sample rate"
             lastSwitchStatus = "Waiting for reliable Music rate"
             appendLog(title: "Apple Music Stream", detail: detail, isError: false)
             return
         }
 
-        guard defaultOutputDevice.supports(sampleRate: source.sampleRate) else {
-            lastAppliedSignature = signature
-            let detail = "\(defaultOutputDevice.name) does not support \(sampleRateLabel(source.sampleRate))"
-            lastSwitchStatus = detail
-            appendLog(title: "Unsupported Rate", detail: detail, isError: true)
-            return
-        }
-
-        do {
-            let changed = try audioManager.apply(
-                sampleRate: source.sampleRate,
-                preferredBitDepth: targetBitDepth
-            )
-            refreshDevices()
-            lastAppliedSignature = signature
-            lastSwitchStatus = changed
-                ? "Matched \(formatLabel(sampleRate: source.sampleRate, bitDepth: targetBitDepth))"
-                : "Already matched \(formatLabel(sampleRate: source.sampleRate, bitDepth: targetBitDepth))"
-            appendLog(
-                title: changed ? "Switched" : "Matched",
-                detail: "\(source.displayTitle) -> \(lastSwitchStatus)",
-                isError: false
-            )
-        } catch {
-            lastAppliedSignature = signature
-            lastSwitchStatus = error.localizedDescription
-            appendLog(title: "Switch Failed", detail: error.localizedDescription, isError: true)
-        }
+        applySwitch(
+            context,
+            changedTitle: "Switched",
+            matchedTitle: "Matched",
+            detail: { "\(source.displayTitle) -> \($0)" }
+        )
     }
 
     private func switchTo(format: DetectedAudioFormat, force: Bool) {
-        guard let defaultOutputDevice else {
-            lastSwitchStatus = "No default output device"
-            return
-        }
-
         let targetBitDepth = format.bitDepth ?? bitDepthPreference.targetBitDepth
-        let signature = formatSignature(
-            device: defaultOutputDevice,
+        guard let context = switchContext(
             sampleRate: format.sampleRate,
             bitDepth: targetBitDepth,
-            reliability: "reliable"
-        )
-        guard force || signature != lastAppliedSignature else {
+            reliability: "reliable",
+            force: force
+        ) else {
             return
         }
 
-        guard defaultOutputDevice.supports(sampleRate: format.sampleRate) else {
-            lastAppliedSignature = signature
-            let detail = "\(defaultOutputDevice.name) does not support \(sampleRateLabel(format.sampleRate))"
-            lastSwitchStatus = detail
-            appendLog(title: "Unsupported Rate", detail: detail, isError: true)
+        applySwitch(
+            context,
+            changedTitle: "Live Switch",
+            matchedTitle: "Live Match",
+            detail: { "\($0) from \(format.source)" }
+        )
+    }
+
+    private typealias SwitchContext = (
+        device: AudioDevice,
+        sampleRate: Double,
+        bitDepth: Int?,
+        signature: String
+    )
+
+    private func switchContext(
+        sampleRate: Double,
+        bitDepth: Int?,
+        reliability: String,
+        force: Bool
+    ) -> SwitchContext? {
+        guard let defaultOutputDevice else {
+            lastSwitchStatus = "No default output device"
+            return nil
+        }
+
+        let signature = formatSignature(
+            device: defaultOutputDevice,
+            sampleRate: sampleRate,
+            bitDepth: bitDepth,
+            reliability: reliability
+        )
+        guard force || signature != lastAppliedSignature else {
+            return nil
+        }
+
+        return (defaultOutputDevice, sampleRate, bitDepth, signature)
+    }
+
+    private func applySwitch(
+        _ context: SwitchContext,
+        changedTitle: String,
+        matchedTitle: String,
+        detail: (String) -> String
+    ) {
+        guard context.device.supports(sampleRate: context.sampleRate) else {
+            lastAppliedSignature = context.signature
+            lastSwitchStatus = "\(context.device.name) does not support \(sampleRateLabel(context.sampleRate))"
+            appendLog(title: "Unsupported Rate", detail: lastSwitchStatus, isError: true)
             return
         }
 
         do {
             let changed = try audioManager.apply(
-                sampleRate: format.sampleRate,
-                preferredBitDepth: targetBitDepth
+                sampleRate: context.sampleRate,
+                preferredBitDepth: context.bitDepth
             )
             refreshDevices()
-            lastAppliedSignature = signature
+            lastAppliedSignature = context.signature
             lastSwitchStatus = changed
-                ? "Matched \(formatLabel(sampleRate: format.sampleRate, bitDepth: targetBitDepth))"
-                : "Already matched \(formatLabel(sampleRate: format.sampleRate, bitDepth: targetBitDepth))"
-            appendLog(
-                title: changed ? "Live Switch" : "Live Match",
-                detail: "\(lastSwitchStatus) from \(format.source)",
-                isError: false
-            )
+                ? "Matched \(formatLabel(sampleRate: context.sampleRate, bitDepth: context.bitDepth))"
+                : "Already matched \(formatLabel(sampleRate: context.sampleRate, bitDepth: context.bitDepth))"
+            appendLog(title: changed ? changedTitle : matchedTitle, detail: detail(lastSwitchStatus), isError: false)
         } catch {
-            lastAppliedSignature = signature
+            lastAppliedSignature = context.signature
             lastSwitchStatus = error.localizedDescription
             appendLog(title: "Switch Failed", detail: error.localizedDescription, isError: true)
         }
@@ -508,6 +661,25 @@ final class LosslessSwitcherController: NSObject, ObservableObject {
         source.bitDepth ?? bitDepthPreference.targetBitDepth
     }
 
+    private func shouldScanHistoricalLogs(forceSwitch: Bool) -> Bool {
+        if forceSwitch {
+            lastHistoricalScanDate = Date()
+            return true
+        }
+
+        guard shouldScanHistoricalLogsForFallback else {
+            return false
+        }
+
+        let now = Date()
+        guard now.timeIntervalSince(lastHistoricalScanDate) >= historicalScanInterval else {
+            return false
+        }
+
+        lastHistoricalScanDate = now
+        return true
+    }
+
     private var shouldScanHistoricalLogsForFallback: Bool {
         guard let lastLiveFormatDate else {
             return true
@@ -523,6 +695,28 @@ final class LosslessSwitcherController: NSObject, ObservableObject {
         }
 
         return lastLiveFormat
+    }
+
+    private func shouldUseLiveFormat(
+        _ format: DetectedAudioFormat,
+        for source: DetectedAudioSource,
+        detectedAt: Date,
+        wasExistingTrack: Bool,
+        isFirstObservedTrack: Bool
+    ) -> Bool {
+        let maximumAge: TimeInterval = wasExistingTrack || isFirstObservedTrack ? 8 : 3
+        guard detectedAt.timeIntervalSince(format.date) <= maximumAge else {
+            return false
+        }
+
+        if wasExistingTrack,
+           source.isSampleRateReliable,
+           format.sampleRate + 0.5 < source.sampleRate,
+           detectedAt.timeIntervalSince(lastObservedTrackChangeDate) > midTrackDownshiftProtectionDelay {
+            return false
+        }
+
+        return true
     }
 
     private func identity(for source: DetectedAudioSource) -> String {

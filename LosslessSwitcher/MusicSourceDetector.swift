@@ -7,61 +7,16 @@ enum MusicDetectionResult: Hashable, Sendable {
     case failed(String)
 }
 
-final class MusicSourceDetector: Sendable {
+final class MusicSourceDetector: @unchecked Sendable {
     private let musicBundleIdentifier = "com.apple.Music"
+    private lazy var detectorScript = NSAppleScript(source: Self.detectorScriptSource)
 
     func detect() -> MusicDetectionResult {
         guard isMusicRunning else {
             return .inactive("Music is not running")
         }
 
-        let script = """
-        tell application "Music"
-            set playerState to player state as text
-            if playerState is not "playing" then
-                return {playerState, 0, 0, "", "", "", "", "", ""}
-            end if
-
-            set theTrack to current track
-            set trackSampleRate to 0
-            set trackBitRate to 0
-            set trackName to ""
-            set trackArtist to ""
-            set trackAlbum to ""
-            set trackKind to ""
-            set trackCloudStatus to ""
-            set trackPersistentID to ""
-
-            try
-                set trackSampleRate to sample rate of theTrack
-            end try
-            try
-                set trackBitRate to bit rate of theTrack
-            end try
-            try
-                set trackName to name of theTrack
-            end try
-            try
-                set trackArtist to artist of theTrack
-            end try
-            try
-                set trackAlbum to album of theTrack
-            end try
-            try
-                set trackKind to kind of theTrack
-            end try
-            try
-                set trackCloudStatus to cloud status of theTrack as text
-            end try
-            try
-                set trackPersistentID to persistent ID of theTrack
-            end try
-
-            return {playerState, trackSampleRate, trackBitRate, trackName, trackArtist, trackAlbum, trackKind, trackCloudStatus, trackPersistentID}
-        end tell
-        """
-
-        guard let appleScript = NSAppleScript(source: script) else {
+        guard let appleScript = detectorScript else {
             return .failed("Unable to prepare Music detector")
         }
 
@@ -108,13 +63,55 @@ final class MusicSourceDetector: Sendable {
         return .playing(source)
     }
 
-    func requestAccess() -> MusicDetectionResult {
-        detect()
-    }
-
-    private var isMusicRunning: Bool {
+    var isMusicRunning: Bool {
         !NSRunningApplication.runningApplications(withBundleIdentifier: musicBundleIdentifier).isEmpty
     }
+
+    private static let detectorScriptSource = """
+        tell application "Music"
+            set playerState to player state as text
+            if playerState is not "playing" then
+                return {playerState, 0, 0, "", "", "", "", "", ""}
+            end if
+
+            set theTrack to current track
+            set trackSampleRate to 0
+            set trackBitRate to 0
+            set trackName to ""
+            set trackArtist to ""
+            set trackAlbum to ""
+            set trackKind to ""
+            set trackCloudStatus to ""
+            set trackPersistentID to ""
+
+            try
+                set trackSampleRate to sample rate of theTrack
+            end try
+            try
+                set trackBitRate to bit rate of theTrack
+            end try
+            try
+                set trackName to name of theTrack
+            end try
+            try
+                set trackArtist to artist of theTrack
+            end try
+            try
+                set trackAlbum to album of theTrack
+            end try
+            try
+                set trackKind to kind of theTrack
+            end try
+            try
+                set trackCloudStatus to cloud status of theTrack as text
+            end try
+            try
+                set trackPersistentID to persistent ID of theTrack
+            end try
+
+            return {playerState, trackSampleRate, trackBitRate, trackName, trackArtist, trackAlbum, trackKind, trackCloudStatus, trackPersistentID}
+        end tell
+        """
 
     private func scriptFailureResult(from errorInfo: NSDictionary) -> MusicDetectionResult {
         let number = errorInfo[NSAppleScript.errorNumber] as? NSNumber

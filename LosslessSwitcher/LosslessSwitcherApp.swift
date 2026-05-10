@@ -50,13 +50,26 @@ struct LosslessSwitcherApp: App {
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(didFinishRestoringWindows),
+            name: NSApplication.didFinishRestoringWindowsNotification,
+            object: NSApplication.shared
+        )
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         MainWindowPresenter.presentInitialWindowIfNeeded()
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        MainWindowPresenter.showMainWindowSoon()
+        MainWindowPresenter.handleReopenRequest()
         return true
+    }
+
+    @objc private func didFinishRestoringWindows() {
+        MainWindowPresenter.closeRestoredWindowIfMenuBarOnly()
     }
 }
 
@@ -75,6 +88,8 @@ enum MainWindowPresenter {
     static func presentInitialWindowIfNeeded() {
         applyUserPreferences()
         guard controller?.isMenuBarOnlyModeEnabled != true else {
+            closeMainWindowSoon()
+            applyUserPreferences()
             return
         }
 
@@ -97,6 +112,27 @@ enum MainWindowPresenter {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
             showMainWindow(force: force)
         }
+    }
+
+    @MainActor
+    static func handleReopenRequest() {
+        guard controller?.isMenuBarOnlyModeEnabled == false else {
+            closeMainWindowSoon()
+            applyUserPreferences()
+            return
+        }
+
+        showMainWindowSoon()
+    }
+
+    @MainActor
+    static func closeRestoredWindowIfMenuBarOnly() {
+        guard controller?.isMenuBarOnlyModeEnabled == true else {
+            return
+        }
+
+        closeMainWindowSoon()
+        applyUserPreferences()
     }
 
     @MainActor
@@ -130,6 +166,9 @@ enum MainWindowPresenter {
             defer: false
         )
         window.title = "LosslessSwitcher"
+        window.isRestorable = false
+        window.restorationClass = nil
+        window.disableSnapshotRestoration()
         window.minSize = NSSize(width: 760, height: 620)
         window.contentViewController = hostingController
         window.isReleasedWhenClosed = false
@@ -140,6 +179,23 @@ enum MainWindowPresenter {
         window.makeKeyAndOrderFront(nil)
 
         self.window = window
+    }
+
+    @MainActor
+    private static func closeMainWindowSoon() {
+        closeMainWindow()
+        DispatchQueue.main.async {
+            closeMainWindow()
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+            closeMainWindow()
+        }
+    }
+
+    @MainActor
+    private static func closeMainWindow() {
+        window?.close()
+        NSApplication.shared.windows.forEach { $0.close() }
     }
 
     @MainActor

@@ -15,8 +15,7 @@ struct CachedTrackFormat: Codable, Hashable, Sendable {
             sampleRate: sampleRate,
             bitDepth: bitDepth,
             source: "Cached format",
-            date: Date(),
-            priority: 2
+            date: Date()
         )
     }
 }

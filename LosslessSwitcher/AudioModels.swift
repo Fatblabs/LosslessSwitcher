@@ -17,19 +17,11 @@ struct AudioSampleRateRange: Hashable, Identifiable, Sendable {
         sampleRate >= minimum - 0.5 && sampleRate <= maximum + 0.5
     }
 
-    var displayName: String {
-        if isFixed {
-            return sampleRateLabel(minimum)
-        }
-
-        return "\(sampleRateLabel(minimum))-\(sampleRateLabel(maximum))"
-    }
 }
 
 struct AudioDevice: Identifiable, Hashable, Sendable {
     let id: AudioObjectID
     let name: String
-    let uid: String
     let isDefaultOutput: Bool
     let currentSampleRate: Double
     let currentBitDepth: Int?

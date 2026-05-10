@@ -24,11 +24,7 @@ enum CoreAudioDeviceError: LocalizedError {
 
 final class CoreAudioDeviceManager {
     func defaultOutputDeviceID() throws -> AudioObjectID {
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
+        var address = propertyAddress(kAudioHardwarePropertyDefaultOutputDevice)
 
         var deviceID = AudioObjectID(kAudioObjectUnknown)
         var dataSize = UInt32(MemoryLayout<AudioObjectID>.size)
@@ -62,11 +58,6 @@ final class CoreAudioDeviceManager {
                 selector: kAudioObjectPropertyName,
                 scope: kAudioObjectPropertyScopeGlobal
             )) ?? "Unknown Output"
-            let uid = (try? stringProperty(
-                objectID: deviceID,
-                selector: kAudioDevicePropertyDeviceUID,
-                scope: kAudioObjectPropertyScopeGlobal
-            )) ?? "\(deviceID)"
             let currentRate = (try? nominalSampleRate(for: deviceID)) ?? 0
             let currentBitDepth = try? currentOutputBitDepth(for: deviceID)
             let sampleRates = (try? availableNominalSampleRates(for: deviceID)) ?? []
@@ -75,7 +66,6 @@ final class CoreAudioDeviceManager {
                 AudioDevice(
                     id: deviceID,
                     name: name,
-                    uid: uid,
                     isDefaultOutput: deviceID == defaultDeviceID,
                     currentSampleRate: currentRate,
                     currentBitDepth: currentBitDepth,
@@ -127,11 +117,7 @@ final class CoreAudioDeviceManager {
     }
 
     func setNominalSampleRate(_ sampleRate: Double, for deviceID: AudioObjectID) throws {
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyNominalSampleRate,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
+        var address = propertyAddress(kAudioDevicePropertyNominalSampleRate)
 
         guard AudioObjectHasProperty(deviceID, &address) else {
             throw CoreAudioDeviceError.propertyUnavailable("Nominal sample rate")
@@ -157,12 +143,19 @@ final class CoreAudioDeviceManager {
         )
     }
 
-    private func allDeviceIDs() throws -> [AudioObjectID] {
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyDevices,
-            mScope: kAudioObjectPropertyScopeGlobal,
+    private func propertyAddress(
+        _ selector: AudioObjectPropertySelector,
+        scope: AudioObjectPropertyScope = kAudioObjectPropertyScopeGlobal
+    ) -> AudioObjectPropertyAddress {
+        AudioObjectPropertyAddress(
+            mSelector: selector,
+            mScope: scope,
             mElement: kAudioObjectPropertyElementMain
         )
+    }
+
+    private func allDeviceIDs() throws -> [AudioObjectID] {
+        var address = propertyAddress(kAudioHardwarePropertyDevices)
 
         var dataSize: UInt32 = 0
         try check(
@@ -198,11 +191,7 @@ final class CoreAudioDeviceManager {
     }
 
     private func outputStreamIDs(for deviceID: AudioObjectID) throws -> [AudioObjectID] {
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyStreams,
-            mScope: kAudioDevicePropertyScopeOutput,
-            mElement: kAudioObjectPropertyElementMain
-        )
+        var address = propertyAddress(kAudioDevicePropertyStreams, scope: kAudioDevicePropertyScopeOutput)
 
         guard AudioObjectHasProperty(deviceID, &address) else {
             return []
@@ -229,11 +218,7 @@ final class CoreAudioDeviceManager {
     }
 
     private func nominalSampleRate(for deviceID: AudioObjectID) throws -> Double {
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyNominalSampleRate,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
+        var address = propertyAddress(kAudioDevicePropertyNominalSampleRate)
 
         var sampleRate = Float64(0)
         var dataSize = UInt32(MemoryLayout<Float64>.size)
@@ -246,11 +231,7 @@ final class CoreAudioDeviceManager {
     }
 
     private func availableNominalSampleRates(for deviceID: AudioObjectID) throws -> [AudioSampleRateRange] {
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyAvailableNominalSampleRates,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
+        var address = propertyAddress(kAudioDevicePropertyAvailableNominalSampleRates)
 
         guard AudioObjectHasProperty(deviceID, &address) else {
             return []
@@ -283,11 +264,7 @@ final class CoreAudioDeviceManager {
         selector: AudioObjectPropertySelector,
         scope: AudioObjectPropertyScope
     ) throws -> String {
-        var address = AudioObjectPropertyAddress(
-            mSelector: selector,
-            mScope: scope,
-            mElement: kAudioObjectPropertyElementMain
-        )
+        var address = propertyAddress(selector, scope: scope)
 
         guard AudioObjectHasProperty(objectID, &address) else {
             throw CoreAudioDeviceError.propertyUnavailable("String property")
@@ -312,11 +289,7 @@ final class CoreAudioDeviceManager {
     }
 
     private func physicalFormat(for streamID: AudioObjectID) throws -> AudioStreamBasicDescription {
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioStreamPropertyPhysicalFormat,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
+        var address = propertyAddress(kAudioStreamPropertyPhysicalFormat)
 
         var format = AudioStreamBasicDescription()
         var dataSize = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
@@ -329,11 +302,7 @@ final class CoreAudioDeviceManager {
     }
 
     private func availablePhysicalFormats(for streamID: AudioObjectID) throws -> [AudioStreamRangedDescription] {
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioStreamPropertyAvailablePhysicalFormats,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
+        var address = propertyAddress(kAudioStreamPropertyAvailablePhysicalFormats)
 
         guard AudioObjectHasProperty(streamID, &address) else {
             return []
@@ -367,11 +336,7 @@ final class CoreAudioDeviceManager {
         var changed = false
 
         for streamID in try outputStreamIDs(for: deviceID) {
-            var address = AudioObjectPropertyAddress(
-                mSelector: kAudioStreamPropertyPhysicalFormat,
-                mScope: kAudioObjectPropertyScopeGlobal,
-                mElement: kAudioObjectPropertyElementMain
-            )
+            var address = propertyAddress(kAudioStreamPropertyPhysicalFormat)
 
             guard AudioObjectHasProperty(streamID, &address) else {
                 continue
