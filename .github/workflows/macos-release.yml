@@ -17,7 +17,7 @@ env:
 jobs:
   build-and-release:
     name: Build macOS app and publish GitHub release
-    runs-on: macos-15-arm64
+    runs-on: macos-15
 
     steps:
       - name: Checkout repository
@@ -34,11 +34,15 @@ jobs:
           echo "Current directory:"
           pwd
 
-          echo "Repo root files:"
+          echo "Repository files:"
           ls -la
 
+          echo "Git ref:"
+          echo "$GITHUB_REF"
+          echo "$GITHUB_REF_NAME"
+
           echo "Finding Xcode projects:"
-          find . -maxdepth 3 -name "*.xcodeproj" -print
+          find . -maxdepth 4 -name "*.xcodeproj" -print
 
           echo "Checking configured project:"
           ls -la "$XCODE_PROJECT"
@@ -47,7 +51,7 @@ jobs:
           test -f "$XCODE_PROJECT/project.pbxproj"
           ls -la "$XCODE_PROJECT/project.pbxproj"
 
-          echo "Available schemes:"
+          echo "Available Xcode schemes:"
           xcodebuild -list -project "$XCODE_PROJECT"
 
       - name: Build macOS app
@@ -60,7 +64,10 @@ jobs:
           DERIVED_DATA_PATH="$RUNNER_TEMP/DerivedData"
 
           echo "Building tag: $TAG_NAME"
-          echo "App version: $VERSION"
+          echo "Version: $VERSION"
+          echo "Project: $XCODE_PROJECT"
+          echo "Scheme: $XCODE_SCHEME"
+          echo "Configuration: $CONFIGURATION"
 
           xcodebuild clean build \
             -project "$XCODE_PROJECT" \
@@ -76,9 +83,13 @@ jobs:
 
           if [ -z "$APP_PATH" ]; then
             echo "::error::Could not find built app named $APP_NAME.app"
-            find "$DERIVED_DATA_PATH/Build/Products" -name "*.app" -type d -print
+            echo "Available .app bundles:"
+            find "$DERIVED_DATA_PATH/Build/Products" -name "*.app" -type d -print || true
             exit 1
           fi
+
+          echo "Built app:"
+          echo "$APP_PATH"
 
           mkdir -p release
 
@@ -89,12 +100,12 @@ jobs:
 
           shasum -a 256 "$ZIP_PATH" > "$ZIP_PATH.sha256"
 
-          echo "ZIP_PATH=$ZIP_PATH" >> "$GITHUB_ENV"
-          echo "CHECKSUM_PATH=$ZIP_PATH.sha256" >> "$GITHUB_ENV"
           echo "TAG_NAME=$TAG_NAME" >> "$GITHUB_ENV"
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "ZIP_PATH=$ZIP_PATH" >> "$GITHUB_ENV"
+          echo "CHECKSUM_PATH=$ZIP_PATH.sha256" >> "$GITHUB_ENV"
 
-      - name: Upload build artifact
+      - name: Upload workflow artifact
         uses: actions/upload-artifact@v6
         with:
           name: ${{ env.APP_NAME }}-${{ env.TAG_NAME }}-macOS
@@ -102,16 +113,27 @@ jobs:
             ${{ env.ZIP_PATH }}
             ${{ env.CHECKSUM_PATH }}
 
-      - name: Create GitHub release
+      - name: Create or update GitHub release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
 
-          gh release create "$TAG_NAME" \
-            "$ZIP_PATH" \
-            "$CHECKSUM_PATH" \
-            --title "$APP_NAME $TAG_NAME" \
-            --notes "Automated macOS build for $APP_NAME $TAG_NAME." \
-            --verify-tags
+          RELEASE_TITLE="$APP_NAME $TAG_NAME"
+
+          if gh release view "$TAG_NAME" >/dev/null 2>&1; then
+            echo "Release already exists for $TAG_NAME. Uploading assets with overwrite."
+            gh release upload "$TAG_NAME" \
+              "$ZIP_PATH" \
+              "$CHECKSUM_PATH" \
+              --clobber
+          else
+            echo "Creating release for $TAG_NAME."
+            gh release create "$TAG_NAME" \
+              "$ZIP_PATH" \
+              "$CHECKSUM_PATH" \
+              --title "$RELEASE_TITLE" \
+              --notes "Automated macOS build for $APP_NAME $TAG_NAME." \
+              --verify-tag
+          fi
