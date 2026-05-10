@@ -10,6 +10,28 @@ This project was inspired by the idea and functionality of [vincentneo/LosslessS
 
 ---
 
+## Download
+
+The recommended way to install LosslessSwitcher is from the GitHub **Releases** page.
+
+1. Open the repository on GitHub.
+2. Click **Releases** on the right side of the repository page.
+3. Download the latest release asset.
+4. Open the downloaded app or archive.
+5. Move **LosslessSwitcher.app** to your **Applications** folder.
+6. Launch the app and allow any required macOS permissions.
+
+If macOS blocks the app because it is from an unidentified developer:
+
+1. Open **System Settings**.
+2. Go to **Privacy & Security**.
+3. Scroll to the security warning for LosslessSwitcher.
+4. Click **Open Anyway**.
+
+Developers can also build the project from source using Xcode. See **Build from Source** below.
+
+---
+
 ## Features
 
 - **Automatic sample-rate switching**
@@ -90,11 +112,11 @@ Actual support depends on your DAC, audio interface, or output device.
 ## Requirements
 
 - macOS with SwiftUI menu bar app support
-- Xcode
 - Apple Music app
 - A DAC, audio interface, or output device with multiple supported sample rates
 - Apple Music Automation permission
 - Console log access may be required for the most accurate live stream format detection
+- Xcode, only if building from source
 
 Because the app uses AppleScript automation and system audio APIs, permissions may be requested by macOS the first time the app tries to read Apple Music or monitor audio behavior.
 
@@ -120,7 +142,22 @@ The live format monitor uses `/usr/bin/log stream` to read relevant Apple Music/
 
 ---
 
-## Build and Run
+## Usage
+
+1. Connect your DAC or audio interface.
+2. Set it as the default macOS output device.
+3. Open LosslessSwitcher.
+4. Enable **Auto**.
+5. Play a track in Apple Music.
+6. The app will detect the source format and switch the output device when the target format is supported.
+
+For manual control, use the **Manual Rate** section to switch to any supported rate reported by the current default output device.
+
+---
+
+## Build from Source
+
+For normal users, download the latest app from the **Releases** tab instead. These steps are for developers who want to build the project manually.
 
 1. Clone the repository:
 
@@ -142,19 +179,6 @@ The live format monitor uses `/usr/bin/log stream` to read relevant Apple Music/
 5. Start playing music in Apple Music.
 
 6. Click **Request Music Access** or **Match Now** if the app does not detect the current track immediately.
-
----
-
-## Usage
-
-1. Connect your DAC or audio interface.
-2. Set it as the default macOS output device.
-3. Open LosslessSwitcher.
-4. Enable **Auto**.
-5. Play a track in Apple Music.
-6. The app will detect the source format and switch the output device when the target format is supported.
-
-For manual control, use the **Manual Rate** section to switch to any supported rate reported by the current default output device.
 
 ---
 
