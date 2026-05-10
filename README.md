@@ -9,6 +9,11 @@ LosslessSwitcher is designed for listeners using external DACs, audio interfaces
 This project was inspired by the idea and functionality of [vincentneo/LosslessSwitcher](https://github.com/vincentneo/LosslessSwitcher), with custom implementation details around live Console log monitoring, CoreAudio device control, Apple Music metadata detection, and a SwiftUI interface.
 
 ---
+## Security
+
+LosslessSwitcher releases include automated VirusTotal scanning during the release process to help improve user safety and peace of mind.
+
+Release builds are automatically checked before distribution so users can verify downloaded builds with greater confidence.
 
 ## Download
 
