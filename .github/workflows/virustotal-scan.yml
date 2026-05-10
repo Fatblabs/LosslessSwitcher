@@ -5,6 +5,9 @@ on:
 jobs:
   scan:
     runs-on: ubuntu-latest
+    # This environment variable forces the use of Node 24
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -14,8 +17,8 @@ jobs:
         id: vt
         with:
           vt_api_key: ${{ secrets.VT_API_KEY }}
-          rate_limit: 4 # Recommended for free accounts
-          summary: true # Automatically generates a job summary
+          rate_limit: 4
+          summary: true
           file_globs: |
             **/*
             ! .git/**
