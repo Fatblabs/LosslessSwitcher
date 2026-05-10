@@ -184,6 +184,29 @@ final class LosslessSwitcherController: NSObject, ObservableObject {
         }
     }
 
+    private func showPendingOutputFormat(sampleRate: Double, bitDepth: Int?) {
+        guard let device = defaultOutputDevice else {
+            return
+        }
+
+        defaultOutputDevice = AudioDevice(
+            id: device.id,
+            name: device.name,
+            isDefaultOutput: device.isDefaultOutput,
+            currentSampleRate: sampleRate,
+            currentBitDepth: bitDepth ?? device.currentBitDepth,
+            supportedSampleRates: device.supportedSampleRates
+        )
+    }
+
+    private func reconcileOutputDeviceSoon() {
+        [0.35, 1.0].forEach { delay in
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                self?.refreshDevices()
+            }
+        }
+    }
+
     func refreshDevicesIfStale() {
         guard Date().timeIntervalSince(lastDeviceRefreshDate) >= deviceRefreshInterval else {
             return
@@ -220,14 +243,16 @@ final class LosslessSwitcherController: NSObject, ObservableObject {
 
     func setManualSampleRate(_ sampleRate: Double) {
         do {
+            let targetBitDepth = bitDepthPreference.targetBitDepth
             let changed = try audioManager.apply(
                 sampleRate: sampleRate,
-                preferredBitDepth: bitDepthPreference.targetBitDepth
+                preferredBitDepth: targetBitDepth
             )
-            refreshDevices()
+            showPendingOutputFormat(sampleRate: sampleRate, bitDepth: targetBitDepth)
+            reconcileOutputDeviceSoon()
             lastSwitchStatus = changed
-                ? "Switched to \(formatLabel(sampleRate: sampleRate, bitDepth: bitDepthPreference.targetBitDepth))"
-                : "Already at \(formatLabel(sampleRate: sampleRate, bitDepth: bitDepthPreference.targetBitDepth))"
+                ? "Switched to \(formatLabel(sampleRate: sampleRate, bitDepth: targetBitDepth))"
+                : "Already at \(formatLabel(sampleRate: sampleRate, bitDepth: targetBitDepth))"
             appendLog(title: "Manual Switch", detail: lastSwitchStatus, isError: false)
             lastAppliedSignature = nil
         } catch {
@@ -630,7 +655,8 @@ final class LosslessSwitcherController: NSObject, ObservableObject {
                 sampleRate: context.sampleRate,
                 preferredBitDepth: context.bitDepth
             )
-            refreshDevices()
+            showPendingOutputFormat(sampleRate: context.sampleRate, bitDepth: context.bitDepth)
+            reconcileOutputDeviceSoon()
             lastAppliedSignature = context.signature
             lastSwitchStatus = changed
                 ? "Matched \(formatLabel(sampleRate: context.sampleRate, bitDepth: context.bitDepth))"
