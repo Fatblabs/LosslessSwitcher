@@ -68,6 +68,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return true
     }
 
+    @MainActor
     @objc private func didFinishRestoringWindows() {
         MainWindowPresenter.closeRestoredWindowIfMenuBarOnly()
     }
