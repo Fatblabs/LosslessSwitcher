@@ -270,7 +270,6 @@ struct SettingsView: View {
 
 struct MenuBarView: View {
     @EnvironmentObject private var controller: LosslessSwitcherController
-    @Environment(\.openSettings) private var openSettings
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -329,19 +328,15 @@ struct MenuBarView: View {
                 Button("Match Now", action: controller.matchCurrentTrackNow)
                 .buttonStyle(.borderedProminent)
 
-                Button("Open") {
+                Button("Show LosslessSwitcher") {
                     MainWindowPresenter.showMainWindowSoon()
                 }
+                .buttonStyle(.bordered)
             }
 
             Divider()
 
             SettingsControlsView()
-
-            HStack {
-                Button("Settings", action: showSettings)
-                Spacer()
-            }
 
             Divider()
 
@@ -349,12 +344,6 @@ struct MenuBarView: View {
         }
         .padding(14)
         .frame(width: 390)
-    }
-
-    private func showSettings() {
-        NSApplication.shared.setActivationPolicy(.regular)
-        NSApplication.shared.activate(ignoringOtherApps: true)
-        openSettings()
     }
 }
 
