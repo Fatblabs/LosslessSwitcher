@@ -1,6 +1,6 @@
 name: Manual VirusTotal Scan
 on:
-  workflow_dispatch: # Allows manual trigger from the Actions tab
+  workflow_dispatch:
 
 jobs:
   scan:
@@ -10,13 +10,19 @@ jobs:
         uses: actions/checkout@v4
 
       - name: VirusTotal Scan
-        uses: crazy-max/ghaction-virustotal@v5
+        uses: cssnr/virustotal-action@v1
+        id: vt
         with:
           vt_api_key: ${{ secrets.VT_API_KEY }}
-          request_rate: 4 # Important for free accounts (4 req/min)
-          files: |
+          rate_limit: 4 # Recommended for free accounts
+          summary: true # Automatically generates a job summary
+          file_globs: |
             **/*
             ! .git/**
             ! node_modules/**
-            ! .github/**
-            ! dist/**
+
+      - name: Display Final List
+        if: always()
+        run: |
+          echo "### 🛡️ Compiled Scan Results" >> $GITHUB_STEP_SUMMARY
+          echo "${{ steps.vt.outputs.results }}" | tr ',' '\n' >> $GITHUB_STEP_SUMMARY
