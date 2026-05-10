@@ -1,5 +1,3 @@
-# LATEST RELEASE: https://github.com/Fatblabs/LosslessSwitcher/releases/tag/v1.1.0
-
 # LosslessSwitcher
 
 A macOS utility that automatically matches your system output device to the sample rate and bit depth of the audio currently playing in Apple Music.
