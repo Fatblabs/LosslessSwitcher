@@ -317,7 +317,8 @@ final class LosslessSwitcherController: NSObject, ObservableObject {
 
         isLibraryCacheScanInProgress = true
         lastSwitchStatus = "Scanning \(scope.label.lowercased())..."
-        appendLog(title: "Song Memory Scan", detail: "Reading current \(scope.label.lowercased()) metadata", isError: false)
+        pendingImmediateDetection?.cancel()
+        liveFormatMonitor.stop()
 
         let detector = musicDetector
         detectionQueue.async { [weak self] in
@@ -349,22 +350,19 @@ final class LosslessSwitcherController: NSObject, ObservableObject {
             }
 
             lastSwitchStatus = "Probing \(min(probeCandidates.count, maximumProbeTrackCount)) \(scan.scope.label.lowercased()) tracks..."
-            appendLog(
-                title: "Stream Probe Started",
-                detail: "Briefly playing Apple Music stream tracks to read real CoreAudio sample rates.",
-                isError: false
-            )
             probeLibraryTracks(scan: scan, metadataStoredCount: metadataStoredCount, candidates: probeCandidates)
 
         case .inactive(let message):
             isLibraryCacheScanInProgress = false
             lastSwitchStatus = message
             appendLog(title: "Song Memory Scan Skipped", detail: message, isError: true)
+            syncLiveFormatMonitor()
 
         case .failed(let message):
             isLibraryCacheScanInProgress = false
             lastSwitchStatus = message
             appendLog(title: "Song Memory Scan Failed", detail: message, isError: true)
+            syncLiveFormatMonitor()
         }
     }
 
@@ -388,6 +386,7 @@ final class LosslessSwitcherController: NSObject, ObservableObject {
             detail: "\(scan.name): \(metadataStoredCount) new from metadata.\(skippedSuffix)\(limitedSuffix)",
             isError: false
         )
+        syncLiveFormatMonitor()
     }
 
     private func probeLibraryTracks(
@@ -510,6 +509,7 @@ final class LosslessSwitcherController: NSObject, ObservableObject {
             detail: "\(result.scan.name): \(result.metadataStoredCount) metadata, \(probedStoredCount) live, \(fallbackStoredCount) fallback.\(failedSuffix)\(skippedSuffix)\(limitedSuffix)\(errorSuffix)",
             isError: result.failedProbeCount > 0 && totalStoredCount == 0
         )
+        syncLiveFormatMonitor()
     }
 
     func refreshLaunchAtLoginStatus() {
@@ -532,6 +532,10 @@ final class LosslessSwitcherController: NSObject, ObservableObject {
         refreshDevicesIfStale()
         syncLiveFormatMonitor()
 
+        guard !isLibraryCacheScanInProgress else {
+            return
+        }
+
         if !isMusicPlaybackActive {
             let now = Date()
             guard now.timeIntervalSince(lastInactiveDetectionDate) >= inactiveDetectionInterval else {
@@ -544,7 +548,7 @@ final class LosslessSwitcherController: NSObject, ObservableObject {
     }
 
     private func detectMusic(forceSwitch: Bool) {
-        guard !isDetectionInFlight else {
+        guard !isDetectionInFlight, !isLibraryCacheScanInProgress else {
             return
         }
 
@@ -652,6 +656,9 @@ final class LosslessSwitcherController: NSObject, ObservableObject {
 
     private func scheduleImmediateDetection(forceSwitch: Bool) {
         pendingImmediateDetection?.cancel()
+        guard !isLibraryCacheScanInProgress else {
+            return
+        }
 
         let workItem = DispatchWorkItem { [weak self] in
             self?.detectMusic(forceSwitch: forceSwitch)
@@ -661,7 +668,7 @@ final class LosslessSwitcherController: NSObject, ObservableObject {
     }
 
     private func syncLiveFormatMonitor() {
-        guard isAutoSwitchEnabled, musicDetector.isMusicRunning, isMusicPlaybackActive else {
+        guard isAutoSwitchEnabled, !isLibraryCacheScanInProgress, musicDetector.isMusicRunning, isMusicPlaybackActive else {
             liveFormatMonitor.stop()
             return
         }
@@ -670,6 +677,10 @@ final class LosslessSwitcherController: NSObject, ObservableObject {
     }
 
     private func handleLiveFormat(_ format: DetectedAudioFormat) {
+        guard !isLibraryCacheScanInProgress else {
+            return
+        }
+
         lastLiveFormat = format
         lastLiveFormatDate = format.date
 
@@ -697,6 +708,10 @@ final class LosslessSwitcherController: NSObject, ObservableObject {
 
     private func finishDetection(_ snapshot: DetectionSnapshot, forceSwitch: Bool) {
         isDetectionInFlight = false
+        guard !isLibraryCacheScanInProgress else {
+            return
+        }
+
         handle(snapshot, forceSwitch: forceSwitch)
     }
 
