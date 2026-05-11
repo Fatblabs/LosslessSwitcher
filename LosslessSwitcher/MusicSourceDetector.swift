@@ -10,6 +10,7 @@ enum MusicDetectionResult: Hashable, Sendable {
 final class MusicSourceDetector: @unchecked Sendable {
     private let musicBundleIdentifier = "com.apple.Music"
     private lazy var detectorScript = NSAppleScript(source: Self.detectorScriptSource)
+    private lazy var currentViewScanScript = NSAppleScript(source: Self.currentViewScanScriptSource)
     private lazy var albumScanScript = NSAppleScript(source: Self.albumScanScriptSource)
     private lazy var playlistScanScript = NSAppleScript(source: Self.playlistScanScriptSource)
 
@@ -72,6 +73,8 @@ final class MusicSourceDetector: @unchecked Sendable {
 
         let script: NSAppleScript?
         switch scope {
+        case .currentView:
+            script = currentViewScanScript
         case .currentAlbum:
             script = albumScanScript
         case .currentPlaylist:
@@ -110,14 +113,24 @@ final class MusicSourceDetector: @unchecked Sendable {
         )
     }
 
-    func playTrack(persistentID: String) -> String? {
+    func playTrack(
+        persistentID: String,
+        confirmationTimeout: TimeInterval,
+        settleDuration: TimeInterval
+    ) -> String? {
         guard isMusicRunning else {
             return "Music is not running"
         }
 
         let escapedPersistentID = persistentID.escapedForAppleScriptString
         guard !escapedPersistentID.isEmpty,
-              let script = NSAppleScript(source: Self.playTrackScriptSource(persistentID: escapedPersistentID)) else {
+              let script = NSAppleScript(
+                source: Self.playTrackScriptSource(
+                    persistentID: escapedPersistentID,
+                    confirmationTimeout: confirmationTimeout,
+                    settleDuration: settleDuration
+                )
+              ) else {
             return "Track is missing a persistent ID"
         }
 
@@ -127,9 +140,26 @@ final class MusicSourceDetector: @unchecked Sendable {
     }
 
     func restorePlayback(_ snapshot: MusicPlaybackSnapshot?) {
-        guard isMusicRunning,
-              let snapshot,
-              let script = NSAppleScript(source: Self.restorePlaybackScriptSource(snapshot: snapshot)) else {
+        guard isMusicRunning else {
+            return
+        }
+
+        guard let snapshot else {
+            stopPlayback()
+            return
+        }
+
+        guard let script = NSAppleScript(source: Self.restorePlaybackScriptSource(snapshot: snapshot)) else {
+            stopPlayback()
+            return
+        }
+
+        var errorInfo: NSDictionary?
+        _ = script.executeAndReturnError(&errorInfo)
+    }
+
+    private func stopPlayback() {
+        guard let script = NSAppleScript(source: Self.stopPlaybackScriptSource) else {
             return
         }
 
@@ -204,17 +234,30 @@ final class MusicSourceDetector: @unchecked Sendable {
         end tell
         """
 
-    private static func playTrackScriptSource(persistentID: String) -> String {
+    private static let stopPlaybackScriptSource = """
+        tell application "Music"
+            stop
+        end tell
         """
+
+    private static func playTrackScriptSource(
+        persistentID: String,
+        confirmationTimeout: TimeInterval,
+        settleDuration: TimeInterval
+    ) -> String {
+        let timeout = String(format: "%.2f", confirmationTimeout)
+        let settle = String(format: "%.2f", settleDuration)
+
+        return """
         tell application "Music"
             set targetTrack to missing value
 
             try
-                set targetTrack to first track of current playlist whose persistent ID is "\(persistentID)"
+                set targetTrack to first track of view of front browser window whose persistent ID is "\(persistentID)"
             end try
             if targetTrack is missing value then
                 try
-                    set targetTrack to first track of view of front browser window whose persistent ID is "\(persistentID)"
+                    set targetTrack to first track of current playlist whose persistent ID is "\(persistentID)"
                 end try
             end if
             if targetTrack is missing value then
@@ -224,7 +267,27 @@ final class MusicSourceDetector: @unchecked Sendable {
             end if
             if targetTrack is missing value then error "Track is no longer available in Music"
 
-            play targetTrack
+            try
+                stop
+            end try
+            delay 0.05
+            play targetTrack once true
+            set startedAt to current date
+            set matchedAt to missing value
+            repeat while ((current date) - startedAt) < \(timeout)
+                try
+                    if persistent ID of current track is "\(persistentID)" and (player state as text) is "playing" then
+                        if matchedAt is missing value then set matchedAt to current date
+                        if player position is greater than 0.12 then return "ok"
+                        if ((current date) - matchedAt) >= \(settle) then return "ok"
+                    else
+                        set matchedAt to missing value
+                    end if
+                end try
+                delay 0.05
+            end repeat
+
+            error "Music did not start the requested probe track"
         end tell
         """
     }
@@ -236,6 +299,11 @@ final class MusicSourceDetector: @unchecked Sendable {
 
         return """
         tell application "Music"
+            try
+                stop
+            end try
+            delay 0.08
+
             if "\(persistentID)" is not "" then
                 try
                     set targetTrack to first track of current playlist whose persistent ID is "\(persistentID)"
@@ -325,6 +393,126 @@ final class MusicSourceDetector: @unchecked Sendable {
             end repeat
 
             return {"ok", "currentPlaylist", playlistName, totalCount, scannedCount, snapshots}
+        end tell
+        """
+
+    private static let currentViewScanScriptSource = trackSnapshotHandlerSource + """
+
+        on losslessSwitcherAlbumMetadata(theTrack)
+            tell application "Music"
+                set trackAlbum to ""
+                set trackArtist to ""
+                set trackAlbumArtist to ""
+                try
+                    set trackAlbum to album of theTrack
+                end try
+                try
+                    set trackArtist to artist of theTrack
+                end try
+                try
+                    set trackAlbumArtist to album artist of theTrack
+                end try
+                if trackAlbumArtist is "" then set trackAlbumArtist to trackArtist
+
+                return {trackAlbum, trackArtist, trackAlbumArtist}
+            end tell
+        end losslessSwitcherAlbumMetadata
+
+        tell application "Music"
+            set targetPlaylist to missing value
+            try
+                set targetPlaylist to view of front browser window
+            on error
+                try
+                    set targetPlaylist to current playlist
+                on error
+                    return {"error", "Open or play an album or playlist in Music first", "", 0, 0, {}}
+                end try
+            end try
+
+            set seedTrack to missing value
+            try
+                set seedTrack to item 1 of selection of front browser window
+            on error
+                try
+                    set seedTrack to current track
+                on error
+                    try
+                        set seedTrack to track 1 of targetPlaylist
+                    end try
+                end try
+            end try
+
+            set playlistName to name of targetPlaylist
+            set playlistIdentity to ""
+            try
+                set playlistIdentity to playlistIdentity & ((class of targetPlaylist) as text)
+            end try
+            try
+                set playlistIdentity to playlistIdentity & " " & ((special kind of targetPlaylist) as text)
+            end try
+            set playlistLooksLibrary to false
+            if playlistIdentity contains "library" or playlistIdentity contains "Library" then set playlistLooksLibrary to true
+            if playlistIdentity contains "Purchased" then set playlistLooksLibrary to true
+
+            set targetAlbum to ""
+            set targetAlbumArtist to ""
+            set targetTrackCount to 0
+            if seedTrack is not missing value then
+                set seedMetadata to my losslessSwitcherAlbumMetadata(seedTrack)
+                set targetAlbum to item 1 of seedMetadata
+                set targetAlbumArtist to item 3 of seedMetadata
+                try
+                    set targetTrackCount to track count of seedTrack
+                end try
+            end if
+
+            set totalCount to count of tracks of targetPlaylist
+            set scanLimit to 1000
+            set playlistScannedCount to 0
+            set albumScannedCount to 0
+            set albumMatchingCount to 0
+            set playlistSnapshots to {}
+            set albumSnapshots to {}
+
+            repeat with trackIndex from 1 to totalCount
+                set theTrack to track trackIndex of targetPlaylist
+
+                if not playlistLooksLibrary and playlistScannedCount is less than scanLimit then
+                    set end of playlistSnapshots to my losslessSwitcherTrackSnapshot(theTrack)
+                    set playlistScannedCount to playlistScannedCount + 1
+                end if
+
+                if targetAlbum is not "" then
+                    set trackMetadata to my losslessSwitcherAlbumMetadata(theTrack)
+                    set trackAlbum to item 1 of trackMetadata
+                    set trackArtist to item 2 of trackMetadata
+                    set trackAlbumArtist to item 3 of trackMetadata
+
+                    if trackAlbum is targetAlbum then
+                        if targetAlbumArtist is "" or trackAlbumArtist is targetAlbumArtist or trackArtist is targetAlbumArtist then
+                            set albumMatchingCount to albumMatchingCount + 1
+                            if albumScannedCount is less than scanLimit then
+                                set end of albumSnapshots to my losslessSwitcherTrackSnapshot(theTrack)
+                                set albumScannedCount to albumScannedCount + 1
+                            end if
+                        end if
+                    end if
+                end if
+            end repeat
+
+            set shouldCacheAlbum to false
+            if targetAlbum is not "" and albumMatchingCount is greater than 0 then
+                if totalCount is albumMatchingCount then set shouldCacheAlbum to true
+                if targetTrackCount is greater than 0 and totalCount is less than or equal to targetTrackCount then set shouldCacheAlbum to true
+                if playlistLooksLibrary then set shouldCacheAlbum to true
+            end if
+
+            if shouldCacheAlbum then
+                return {"ok", "currentAlbum", targetAlbum, albumMatchingCount, albumScannedCount, albumSnapshots}
+            end if
+
+            return {"ok", "currentPlaylist", playlistName, totalCount, playlistScannedCount, playlistSnapshots}
         end tell
         """
 

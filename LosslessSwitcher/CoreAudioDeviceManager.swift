@@ -52,26 +52,10 @@ final class CoreAudioDeviceManager {
         let deviceIDs = try allDeviceIDs()
         var devices: [AudioDevice] = []
 
-        for deviceID in deviceIDs where (try? hasOutputStreams(deviceID)) == true {
-            let name = (try? stringProperty(
-                objectID: deviceID,
-                selector: kAudioObjectPropertyName,
-                scope: kAudioObjectPropertyScopeGlobal
-            )) ?? "Unknown Output"
-            let currentRate = (try? nominalSampleRate(for: deviceID)) ?? 0
-            let currentBitDepth = try? currentOutputBitDepth(for: deviceID)
-            let sampleRates = (try? availableNominalSampleRates(for: deviceID)) ?? []
-
-            devices.append(
-                AudioDevice(
-                    id: deviceID,
-                    name: name,
-                    isDefaultOutput: deviceID == defaultDeviceID,
-                    currentSampleRate: currentRate,
-                    currentBitDepth: currentBitDepth,
-                    supportedSampleRates: sampleRates
-                )
-            )
+        for deviceID in deviceIDs {
+            if let device = audioDevice(for: deviceID, defaultDeviceID: defaultDeviceID) {
+                devices.append(device)
+            }
         }
 
         return devices.sorted {
@@ -85,7 +69,7 @@ final class CoreAudioDeviceManager {
 
     func defaultOutputDevice() throws -> AudioDevice {
         let defaultID = try defaultOutputDeviceID()
-        guard let device = try outputDevices().first(where: { $0.id == defaultID }) else {
+        guard let device = audioDevice(for: defaultID, defaultDeviceID: defaultID) else {
             throw CoreAudioDeviceError.outputDeviceUnavailable
         }
 
@@ -186,8 +170,32 @@ final class CoreAudioDeviceManager {
         return deviceIDs
     }
 
-    private func hasOutputStreams(_ deviceID: AudioObjectID) throws -> Bool {
-        try !outputStreamIDs(for: deviceID).isEmpty
+    private func audioDevice(
+        for deviceID: AudioObjectID,
+        defaultDeviceID: AudioObjectID?
+    ) -> AudioDevice? {
+        let streamIDs = (try? outputStreamIDs(for: deviceID)) ?? []
+        guard !streamIDs.isEmpty else {
+            return nil
+        }
+
+        let name = (try? stringProperty(
+            objectID: deviceID,
+            selector: kAudioObjectPropertyName,
+            scope: kAudioObjectPropertyScopeGlobal
+        )) ?? "Unknown Output"
+        let currentRate = (try? nominalSampleRate(for: deviceID)) ?? 0
+        let currentBitDepth = currentOutputBitDepth(for: streamIDs)
+        let sampleRates = (try? availableNominalSampleRates(for: deviceID)) ?? []
+
+        return AudioDevice(
+            id: deviceID,
+            name: name,
+            isDefaultOutput: deviceID == defaultDeviceID,
+            currentSampleRate: currentRate,
+            currentBitDepth: currentBitDepth,
+            supportedSampleRates: sampleRates
+        )
     }
 
     private func outputStreamIDs(for deviceID: AudioObjectID) throws -> [AudioObjectID] {
@@ -278,8 +286,8 @@ final class CoreAudioDeviceManager {
         return value?.takeRetainedValue() as String? ?? ""
     }
 
-    private func currentOutputBitDepth(for deviceID: AudioObjectID) throws -> Int? {
-        for streamID in try outputStreamIDs(for: deviceID) {
+    private func currentOutputBitDepth(for streamIDs: [AudioObjectID]) -> Int? {
+        for streamID in streamIDs {
             if let format = try? physicalFormat(for: streamID), format.mBitsPerChannel > 0 {
                 return Int(format.mBitsPerChannel)
             }

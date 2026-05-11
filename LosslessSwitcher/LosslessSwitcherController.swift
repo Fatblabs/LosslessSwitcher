@@ -75,6 +75,9 @@ final class LosslessSwitcherController: NSObject, ObservableObject {
     private var lastLiveFormat: DetectedAudioFormat?
     private var lastLiveFormatDate: Date?
     private var lastLiveFormatLogSignature: String?
+    private var isLiveFormatMonitorActive = false
+    private var liveFormatMonitorStartedAt: Date?
+    private var liveFormatMonitorSuppressedTrackIdentity: String?
     private var lastDeviceRefreshDate = Date.distantPast
     private var lastHistoricalScanDate = Date.distantPast
     private var lastInactiveDetectionDate = Date.distantPast
@@ -84,13 +87,16 @@ final class LosslessSwitcherController: NSObject, ObservableObject {
     private var distributedObservers: [NSObjectProtocol] = []
     private var pendingImmediateDetection: DispatchWorkItem?
 
-    private let playbackPollInterval: TimeInterval = 2
+    private let playbackPollInterval: TimeInterval = 5
     private let inactiveDetectionInterval: TimeInterval = 8
     private let deviceRefreshInterval: TimeInterval = 20
     private let historicalScanInterval: TimeInterval = 20
+    private let liveFormatMonitorTimeout: TimeInterval = 12
     private let midTrackDownshiftProtectionDelay: TimeInterval = 8
     private let maximumProbeTrackCount = 200
     private let probeTrackTimeout: TimeInterval = 8
+    private let probePlaybackStartTimeout: TimeInterval = 4
+    private let probePlaybackSettleDuration: TimeInterval = 0.65
 
     private struct DetectionSnapshot: Sendable {
         let musicResult: MusicDetectionResult
@@ -190,7 +196,7 @@ final class LosslessSwitcherController: NSObject, ObservableObject {
     func refreshDevices() {
         lastDeviceRefreshDate = Date()
         do {
-            defaultOutputDevice = try audioManager.outputDevices().first(where: \.isDefaultOutput)
+            defaultOutputDevice = try audioManager.defaultOutputDevice()
         } catch {
             lastSwitchStatus = error.localizedDescription
             appendLog(title: "Device Refresh Failed", detail: error.localizedDescription, isError: true)
@@ -302,12 +308,8 @@ final class LosslessSwitcherController: NSObject, ObservableObject {
         appendLog(title: "Song Memory Cleared", detail: "Removed all cached song formats", isError: false)
     }
 
-    func cacheCurrentAlbum() {
-        cacheLibraryScope(.currentAlbum)
-    }
-
-    func cacheCurrentPlaylist() {
-        cacheLibraryScope(.currentPlaylist)
+    func cacheCurrentMusicView() {
+        cacheLibraryScope(.currentView)
     }
 
     private func cacheLibraryScope(_ scope: MusicLibraryCacheScope) {
@@ -318,7 +320,7 @@ final class LosslessSwitcherController: NSObject, ObservableObject {
         isLibraryCacheScanInProgress = true
         lastSwitchStatus = "Scanning \(scope.label.lowercased())..."
         pendingImmediateDetection?.cancel()
-        liveFormatMonitor.stop()
+        stopLiveFormatMonitor()
 
         let detector = musicDetector
         detectionQueue.async { [weak self] in
@@ -397,6 +399,8 @@ final class LosslessSwitcherController: NSObject, ObservableObject {
         let detector = musicDetector
         let probeTrackTimeout = probeTrackTimeout
         let maximumProbeTrackCount = maximumProbeTrackCount
+        let probePlaybackStartTimeout = probePlaybackStartTimeout
+        let probePlaybackSettleDuration = probePlaybackSettleDuration
 
         detectionQueue.async { [weak self] in
             let snapshot = detector.capturePlaybackSnapshot()
@@ -410,37 +414,44 @@ final class LosslessSwitcherController: NSObject, ObservableObject {
             var probeError = probeStartError
             var hasObservedFormat = false
 
-            defer {
-                formatProbe.stop()
-                detector.restorePlayback(snapshot)
-            }
+            if probeStartError != nil {
+                failedProbeCount = probeTargets.count
+            } else {
+                for (index, source) in probeTargets.enumerated() {
+                    DispatchQueue.main.async { [weak self] in
+                        self?.lastSwitchStatus = "Probing \(index + 1) of \(probeTargets.count)..."
+                    }
 
-            for (index, source) in probeTargets.enumerated() {
-                DispatchQueue.main.async { [weak self] in
-                    self?.lastSwitchStatus = "Probing \(index + 1) of \(probeTargets.count)..."
-                }
+                    formatProbe.reset()
+                    let startedAt = Date()
+                    if let error = detector.playTrack(
+                        persistentID: source.persistentID,
+                        confirmationTimeout: probePlaybackStartTimeout,
+                        settleDuration: probePlaybackSettleDuration
+                    ) {
+                        failedProbeCount += 1
+                        NSLog("LosslessSwitcher stream probe failed for \(source.displayTitle): \(error)")
+                        if Self.shouldAbortProbe(afterPlaybackError: error) {
+                            probeError = error
+                            failedProbeCount += max(probeTargets.count - index - 1, 0)
+                            break
+                        }
+                        continue
+                    }
 
-                formatProbe.reset()
-                let startedAt = Date()
-                if let error = detector.playTrack(persistentID: source.persistentID) {
-                    failedProbeCount += 1
-                    NSLog("LosslessSwitcher stream probe failed for \(source.displayTitle): \(error)")
-                    continue
-                }
-
-                if probeStartError == nil,
-                   let format = formatProbe.waitForFormat(after: startedAt, timeout: probeTrackTimeout) {
-                    hasObservedFormat = true
-                    probedSources.append(source.withConsoleFormat(format))
-                } else if probeError == nil, let error = formatProbe.errorMessage {
-                    probeError = error
-                    failedProbeCount += 1
-                } else if probeError == nil,
-                          hasObservedFormat,
-                          let fallbackSource = Self.metadataFallbackSource(for: source) {
-                    fallbackSources.append(fallbackSource)
-                } else {
-                    failedProbeCount += 1
+                    if let format = formatProbe.waitForFormat(after: startedAt, timeout: probeTrackTimeout) {
+                        hasObservedFormat = true
+                        probedSources.append(source.withConsoleFormat(format))
+                    } else if let error = formatProbe.errorMessage {
+                        probeError = error
+                        failedProbeCount += probeTargets.count - index
+                        break
+                    } else if hasObservedFormat,
+                              let fallbackSource = Self.metadataFallbackSource(for: source) {
+                        fallbackSources.append(fallbackSource)
+                    } else {
+                        failedProbeCount += 1
+                    }
                 }
             }
 
@@ -455,9 +466,24 @@ final class LosslessSwitcherController: NSObject, ObservableObject {
             )
 
             DispatchQueue.main.async { [weak self] in
+                self?.lastSwitchStatus = "Restoring Music..."
+            }
+            formatProbe.stop()
+            detector.restorePlayback(snapshot)
+
+            DispatchQueue.main.async { [weak self] in
                 self?.finishLibraryProbe(result)
             }
         }
+    }
+
+    nonisolated private static func shouldAbortProbe(afterPlaybackError error: String) -> Bool {
+        let normalizedError = error.lowercased()
+        return normalizedError.contains("not running")
+            || normalizedError.contains("not ready")
+            || normalizedError.contains("automation")
+            || normalizedError.contains("not allowed")
+            || normalizedError.contains("did not start")
     }
 
     nonisolated private static func metadataFallbackSource(
@@ -625,7 +651,7 @@ final class LosslessSwitcherController: NSObject, ObservableObject {
 
             Task { @MainActor [weak self] in
                 self?.clearPlaybackState(status: "Music is not running")
-                self?.liveFormatMonitor.stop()
+                self?.stopLiveFormatMonitor()
             }
         }
 
@@ -669,11 +695,62 @@ final class LosslessSwitcherController: NSObject, ObservableObject {
 
     private func syncLiveFormatMonitor() {
         guard isAutoSwitchEnabled, !isLibraryCacheScanInProgress, musicDetector.isMusicRunning, isMusicPlaybackActive else {
-            liveFormatMonitor.stop()
+            stopLiveFormatMonitor()
             return
         }
 
+        guard shouldRunLiveFormatMonitor() else {
+            stopLiveFormatMonitor()
+            return
+        }
+
+        startLiveFormatMonitor()
+    }
+
+    private func shouldRunLiveFormatMonitor() -> Bool {
+        let now = Date()
+        if let currentSource,
+           liveFormatMonitorSuppressedTrackIdentity == identity(for: currentSource) {
+            return false
+        }
+
+        if let liveFormatMonitorStartedAt,
+           now.timeIntervalSince(liveFormatMonitorStartedAt) > liveFormatMonitorTimeout {
+            if let currentSource {
+                liveFormatMonitorSuppressedTrackIdentity = identity(for: currentSource)
+            }
+            return false
+        }
+
+        guard let currentSource else {
+            return true
+        }
+
+        if currentSource.isSampleRateReliable {
+            return false
+        }
+
+        return formatCache.format(for: currentSource) == nil
+    }
+
+    private func startLiveFormatMonitor() {
+        guard !isLiveFormatMonitorActive else {
+            return
+        }
+
+        isLiveFormatMonitorActive = true
+        liveFormatMonitorStartedAt = Date()
         liveFormatMonitor.start()
+    }
+
+    private func stopLiveFormatMonitor() {
+        guard isLiveFormatMonitorActive else {
+            return
+        }
+
+        isLiveFormatMonitorActive = false
+        liveFormatMonitorStartedAt = nil
+        liveFormatMonitor.stop()
     }
 
     private func handleLiveFormat(_ format: DetectedAudioFormat) {
@@ -695,6 +772,7 @@ final class LosslessSwitcherController: NSObject, ObservableObject {
             let resolvedSource = source.withConsoleFormat(format)
             currentSource = resolvedSource
             detectorStatus = "\(resolvedSource.appName) \(formatLabel(sampleRate: resolvedSource.sampleRate, bitDepth: resolvedSource.bitDepth))"
+            syncLiveFormatMonitor()
         } else {
             detectorStatus = "Music \(formatLabel(sampleRate: format.sampleRate, bitDepth: format.bitDepth))"
         }
@@ -719,10 +797,10 @@ final class LosslessSwitcherController: NSObject, ObservableObject {
         switch snapshot.musicResult {
         case .playing(let source):
             isMusicPlaybackActive = true
-            syncLiveFormatMonitor()
             let resolvedSource = sourceWithBestAvailableFormat(from: source, snapshot: snapshot)
             currentSource = resolvedSource
             detectorStatus = "\(resolvedSource.appName) \(formatLabel(sampleRate: resolvedSource.sampleRate, bitDepth: resolvedSource.bitDepth))"
+            syncLiveFormatMonitor()
             recordConsoleError(snapshot.consoleError)
             maybeLogNewSource(resolvedSource)
             rememberFormatIfPossible(resolvedSource)
@@ -766,6 +844,10 @@ final class LosslessSwitcherController: NSObject, ObservableObject {
             lastObservedTrackIdentity = trackIdentity
             lastObservedTrackChangeDate = snapshot.detectedAt
             lastAppliedSignature = nil
+            liveFormatMonitorSuppressedTrackIdentity = nil
+            if isLiveFormatMonitorActive {
+                liveFormatMonitorStartedAt = snapshot.detectedAt
+            }
         }
 
         if let consoleFormat = snapshot.consoleFormat,

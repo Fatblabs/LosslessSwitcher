@@ -131,6 +131,7 @@ struct SwitchLogEntry: Identifiable, Hashable, Sendable {
 }
 
 enum MusicLibraryCacheScope: String, Identifiable, Sendable {
+    case currentView
     case currentAlbum
     case currentPlaylist
 
@@ -140,6 +141,8 @@ enum MusicLibraryCacheScope: String, Identifiable, Sendable {
 
     var label: String {
         switch self {
+        case .currentView:
+            return "Current View"
         case .currentAlbum:
             return "Album"
         case .currentPlaylist:

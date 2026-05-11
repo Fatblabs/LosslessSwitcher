@@ -10,9 +10,14 @@ struct DetectedAudioFormat: Hashable, Sendable {
 
 nonisolated final class ConsoleAudioFormatDetector: @unchecked Sendable {
     private let predicate = NSPredicate(
-        format: "(subsystem = %@) AND (process = %@)",
+        format: "(process == %@) AND (((subsystem == %@) AND (eventMessage CONTAINS[c] %@) AND (eventMessage CONTAINS[c] %@)) OR ((subsystem == %@) AND (eventMessage CONTAINS[c] %@) AND (eventMessage CONTAINS[c] %@)))",
+        "Music",
         "com.apple.coreaudio",
-        "Music"
+        "ACAppleLosslessDecoder.cpp",
+        "Input format:",
+        "com.apple.coremedia",
+        "Creating AudioQueue",
+        "sampleRate:"
     )
 
     func detectRecentFormat(
@@ -21,19 +26,24 @@ nonisolated final class ConsoleAudioFormatDetector: @unchecked Sendable {
     ) throws -> DetectedAudioFormat? {
         let store = try OSLogStore.local()
         let position = store.position(timeIntervalSinceEnd: -lookback)
+        var latestFormat: DetectedAudioFormat?
 
-        return try store
-            .getEntries(at: position, matching: predicate)
-            .compactMap { ($0 as? OSLogEntryLog).flatMap(ConsoleAudioFormatParser.parse) }
-            .filter { format in
-                guard let minimumDate else {
-                    return true
-                }
-
-                return format.date >= minimumDate
+        for entry in try store.getEntries(at: position, matching: predicate) {
+            guard let logEntry = entry as? OSLogEntryLog,
+                  let format = ConsoleAudioFormatParser.parse(logEntry) else {
+                continue
             }
-            .sorted { $0.date > $1.date }
-            .first
+
+            if let minimumDate, format.date < minimumDate {
+                continue
+            }
+
+            if latestFormat.map({ format.date > $0.date }) ?? true {
+                latestFormat = format
+            }
+        }
+
+        return latestFormat
     }
 }
 

@@ -12,6 +12,8 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 18) {
                 header
 
+                memoryPanel
+
                 HStack(alignment: .top, spacing: 14) {
                     nowPlayingPanel
                     outputPanel
@@ -110,7 +112,6 @@ struct ContentView: View {
                         .buttonStyle(AppButtonStyle(tint: .mint))
                     }
 
-                    cacheActionButtons
                 }
             } else {
                 EmptyStateView(
@@ -135,8 +136,6 @@ struct ContentView: View {
                     }
                     .buttonStyle(AppButtonStyle(tint: .mint))
                 }
-
-                cacheActionButtons
             }
         }
     }
@@ -235,6 +234,12 @@ struct ContentView: View {
         }
     }
 
+    private var memoryPanel: some View {
+        PremiumPanel("Memory", systemImage: "memorychip", tint: .orange) {
+            MemoryControlsView()
+        }
+    }
+
     private var activityPanel: some View {
         PremiumPanel("Activity", systemImage: "waveform.path.ecg", tint: .orange) {
             if controller.logEntries.isEmpty {
@@ -280,31 +285,6 @@ struct ContentView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
-        }
-    }
-
-    private var cacheActionButtons: some View {
-        HStack(spacing: 10) {
-            Button {
-                controller.cacheCurrentAlbum()
-            } label: {
-                Label("Cache Album", systemImage: "square.stack")
-            }
-            .buttonStyle(AppButtonStyle(tint: .indigo))
-            .disabled(controller.isLibraryCacheScanInProgress)
-
-            Button {
-                controller.cacheCurrentPlaylist()
-            } label: {
-                Label("Cache Playlist", systemImage: "music.note.list")
-            }
-            .buttonStyle(AppButtonStyle(tint: .indigo))
-            .disabled(controller.isLibraryCacheScanInProgress)
-
-            if controller.isLibraryCacheScanInProgress {
-                ProgressView()
-                    .controlSize(.small)
-            }
         }
     }
 
@@ -363,13 +343,6 @@ struct SettingsControlsView: View {
                 isOn: $controller.isMenuBarOnlyModeEnabled
             )
 
-            LibraryCacheActionsRow(
-                isScanning: controller.isLibraryCacheScanInProgress,
-                compact: compact,
-                cacheAlbum: controller.cacheCurrentAlbum,
-                cachePlaylist: controller.cacheCurrentPlaylist
-            )
-
             SettingToggleRow(
                 title: "Launch at Login",
                 systemImage: "power",
@@ -378,6 +351,21 @@ struct SettingsControlsView: View {
                     get: { controller.isLaunchAtLoginEnabled },
                     set: { controller.setLaunchAtLoginEnabled($0) }
                 )
+            )
+        }
+    }
+}
+
+struct MemoryControlsView: View {
+    @EnvironmentObject private var controller: LosslessSwitcherController
+    var compact = false
+
+    var body: some View {
+        VStack(spacing: compact ? 8 : 10) {
+            LibraryCacheActionsRow(
+                isScanning: controller.isLibraryCacheScanInProgress,
+                compact: compact,
+                cacheCurrentView: controller.cacheCurrentMusicView
             )
 
             CacheControlRow(count: controller.cachedTrackCount) {
@@ -407,6 +395,8 @@ struct SettingsView: View {
             }
 
             SettingsControlsView()
+
+            MemoryControlsView()
 
             Divider().opacity(0.5)
 
@@ -481,6 +471,10 @@ struct MenuBarView: View {
             Divider().opacity(0.5)
 
             SettingsControlsView(compact: true)
+
+            Divider().opacity(0.5)
+
+            MemoryControlsView(compact: true)
 
             Divider().opacity(0.5)
 
@@ -773,8 +767,7 @@ private struct CacheControlRow: View {
 private struct LibraryCacheActionsRow: View {
     let isScanning: Bool
     let compact: Bool
-    let cacheAlbum: () -> Void
-    let cachePlaylist: () -> Void
+    let cacheCurrentView: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -801,17 +794,10 @@ private struct LibraryCacheActionsRow: View {
                 }
             }
 
-            HStack(spacing: 8) {
-                Button(action: cacheAlbum) {
-                    Label(compact ? "Album" : "Cache Album", systemImage: "square.stack")
-                }
-                .disabled(isScanning)
-
-                Button(action: cachePlaylist) {
-                    Label(compact ? "Playlist" : "Cache Playlist", systemImage: "music.note.list")
-                }
-                .disabled(isScanning)
+            Button(action: cacheCurrentView) {
+                Label(compact ? "Cache View" : "Cache Current View", systemImage: "wand.and.stars")
             }
+            .disabled(isScanning)
             .buttonStyle(.bordered)
         }
         .padding(.horizontal, 10)
