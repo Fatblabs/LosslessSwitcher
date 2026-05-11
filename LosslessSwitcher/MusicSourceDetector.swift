@@ -91,6 +91,52 @@ final class MusicSourceDetector: @unchecked Sendable {
         return parseTrackScan(descriptor, requestedScope: scope)
     }
 
+    func capturePlaybackSnapshot() -> MusicPlaybackSnapshot? {
+        guard isMusicRunning,
+              let script = NSAppleScript(source: Self.playbackSnapshotScriptSource) else {
+            return nil
+        }
+
+        var errorInfo: NSDictionary?
+        let descriptor = script.executeAndReturnError(&errorInfo)
+        guard errorInfo == nil, descriptor.descriptorType == typeAEList else {
+            return nil
+        }
+
+        return MusicPlaybackSnapshot(
+            playerState: descriptor.atIndex(1)?.stringValue ?? "stopped",
+            persistentID: descriptor.atIndex(2)?.stringValue ?? "",
+            playerPosition: descriptor.atIndex(3)?.doubleValue ?? 0
+        )
+    }
+
+    func playTrack(persistentID: String) -> String? {
+        guard isMusicRunning else {
+            return "Music is not running"
+        }
+
+        let escapedPersistentID = persistentID.escapedForAppleScriptString
+        guard !escapedPersistentID.isEmpty,
+              let script = NSAppleScript(source: Self.playTrackScriptSource(persistentID: escapedPersistentID)) else {
+            return "Track is missing a persistent ID"
+        }
+
+        var errorInfo: NSDictionary?
+        _ = script.executeAndReturnError(&errorInfo)
+        return errorInfo.flatMap(scriptErrorMessage)
+    }
+
+    func restorePlayback(_ snapshot: MusicPlaybackSnapshot?) {
+        guard isMusicRunning,
+              let snapshot,
+              let script = NSAppleScript(source: Self.restorePlaybackScriptSource(snapshot: snapshot)) else {
+            return
+        }
+
+        var errorInfo: NSDictionary?
+        _ = script.executeAndReturnError(&errorInfo)
+    }
+
     var isMusicRunning: Bool {
         !NSRunningApplication.runningApplications(withBundleIdentifier: musicBundleIdentifier).isEmpty
     }
@@ -140,6 +186,80 @@ final class MusicSourceDetector: @unchecked Sendable {
             return {playerState, trackSampleRate, trackBitRate, trackName, trackArtist, trackAlbum, trackKind, trackCloudStatus, trackPersistentID}
         end tell
         """
+
+    private static let playbackSnapshotScriptSource = """
+        tell application "Music"
+            set playerStateText to player state as text
+            set trackPersistentID to ""
+            set trackPosition to 0
+
+            try
+                set trackPersistentID to persistent ID of current track
+            end try
+            try
+                set trackPosition to player position
+            end try
+
+            return {playerStateText, trackPersistentID, trackPosition}
+        end tell
+        """
+
+    private static func playTrackScriptSource(persistentID: String) -> String {
+        """
+        tell application "Music"
+            set targetTrack to missing value
+
+            try
+                set targetTrack to first track of current playlist whose persistent ID is "\(persistentID)"
+            end try
+            if targetTrack is missing value then
+                try
+                    set targetTrack to first track of view of front browser window whose persistent ID is "\(persistentID)"
+                end try
+            end if
+            if targetTrack is missing value then
+                try
+                    set targetTrack to first track of library playlist 1 whose persistent ID is "\(persistentID)"
+                end try
+            end if
+            if targetTrack is missing value then error "Track is no longer available in Music"
+
+            play targetTrack
+        end tell
+        """
+    }
+
+    private static func restorePlaybackScriptSource(snapshot: MusicPlaybackSnapshot) -> String {
+        let persistentID = snapshot.persistentID.escapedForAppleScriptString
+        let playerState = snapshot.playerState.escapedForAppleScriptString
+        let playerPosition = max(snapshot.playerPosition, 0)
+
+        return """
+        tell application "Music"
+            if "\(persistentID)" is not "" then
+                try
+                    set targetTrack to first track of current playlist whose persistent ID is "\(persistentID)"
+                    play targetTrack
+                on error
+                    try
+                        set targetTrack to first track of library playlist 1 whose persistent ID is "\(persistentID)"
+                        play targetTrack
+                    end try
+                end try
+
+                try
+                    set player position to \(playerPosition)
+                end try
+            end if
+
+            if "\(playerState)" is "paused" then
+                pause
+            else if "\(playerState)" is "stopped" then
+                stop
+            end if
+        end tell
+        """
+    }
 
     private static let trackSnapshotHandlerSource = """
         on losslessSwitcherTrackSnapshot(theTrack)
@@ -192,14 +312,14 @@ final class MusicSourceDetector: @unchecked Sendable {
                 set targetPlaylist to view of front browser window
             end try
             set playlistName to name of targetPlaylist
-            set trackItems to tracks of targetPlaylist
-            set totalCount to count of trackItems
+            set totalCount to count of tracks of targetPlaylist
             set scannedCount to 0
             set scanLimit to 1000
             set snapshots to {}
 
-            repeat with theTrack in trackItems
+            repeat with trackIndex from 1 to totalCount
                 if scannedCount is greater than or equal to scanLimit then exit repeat
+                set theTrack to track trackIndex of targetPlaylist
                 set end of snapshots to my losslessSwitcherTrackSnapshot(theTrack)
                 set scannedCount to scannedCount + 1
             end repeat
@@ -243,13 +363,14 @@ final class MusicSourceDetector: @unchecked Sendable {
             on error
                 set targetPlaylist to view of front browser window
             end try
-            set trackItems to tracks of targetPlaylist
+            set totalCount to count of tracks of targetPlaylist
             set matchingCount to 0
             set scannedCount to 0
             set scanLimit to 1000
             set snapshots to {}
 
-            repeat with theTrack in trackItems
+            repeat with trackIndex from 1 to totalCount
+                set theTrack to track trackIndex of targetPlaylist
                 set trackAlbum to ""
                 set trackArtist to ""
                 set trackAlbumArtist to ""
@@ -345,14 +466,10 @@ final class MusicSourceDetector: @unchecked Sendable {
         }
 
         let sampleRate = Double(descriptor.atIndex(1)?.int32Value ?? 0)
-        guard sampleRate > 0 else {
-            return nil
-        }
-
         let bitRateValue = descriptor.atIndex(2)?.int32Value ?? 0
         let kind = descriptor.atIndex(6)?.stringValue ?? ""
         let cloudStatus = descriptor.atIndex(7)?.stringValue ?? ""
-        let reliability = sampleRateReliability(kind: kind, cloudStatus: cloudStatus)
+        let reliability = sampleRateReliability(sampleRate: sampleRate, kind: kind, cloudStatus: cloudStatus)
 
         return DetectedAudioSource(
             appName: "Music",
@@ -371,7 +488,18 @@ final class MusicSourceDetector: @unchecked Sendable {
         )
     }
 
-    private func sampleRateReliability(kind: String, cloudStatus: String) -> (isReliable: Bool, note: String?) {
+    private func sampleRateReliability(
+        sampleRate: Double? = nil,
+        kind: String,
+        cloudStatus: String
+    ) -> (isReliable: Bool, note: String?) {
+        if let sampleRate, sampleRate <= 0 {
+            return (
+                false,
+                "Music library metadata does not expose this track's sample rate before playback."
+            )
+        }
+
         let combined = "\(kind) \(cloudStatus)".lowercased()
         guard combined.contains("hls") || combined.contains("subscription") else {
             return (true, nil)
@@ -381,6 +509,10 @@ final class MusicSourceDetector: @unchecked Sendable {
             false,
             "Waiting for CoreAudio's decoder format. Music metadata reports this as \(kind.isEmpty ? "streaming media" : kind)."
         )
+    }
+
+    private func scriptErrorMessage(from errorInfo: NSDictionary) -> String {
+        errorInfo[NSAppleScript.errorMessage] as? String ?? "Music automation failed"
     }
 }
 
@@ -394,5 +526,12 @@ private extension MusicDetectionResult {
         case .playing:
             return .failed("Music returned an unexpected playback result")
         }
+    }
+}
+
+private extension String {
+    var escapedForAppleScriptString: String {
+        replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
     }
 }

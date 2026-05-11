@@ -89,12 +89,24 @@ final class LosslessSwitcherController: NSObject, ObservableObject {
     private let deviceRefreshInterval: TimeInterval = 20
     private let historicalScanInterval: TimeInterval = 20
     private let midTrackDownshiftProtectionDelay: TimeInterval = 8
+    private let maximumProbeTrackCount = 200
+    private let probeTrackTimeout: TimeInterval = 8
 
     private struct DetectionSnapshot: Sendable {
         let musicResult: MusicDetectionResult
         let consoleFormat: DetectedAudioFormat?
         let consoleError: String?
         let detectedAt: Date
+    }
+
+    private struct LibraryProbeResult: Sendable {
+        let scan: MusicLibraryTrackScan
+        let metadataStoredCount: Int
+        let probedSources: [DetectedAudioSource]
+        let fallbackSources: [DetectedAudioSource]
+        let failedProbeCount: Int
+        let skippedProbeCount: Int
+        let probeError: String?
     }
 
     override init() {
@@ -318,36 +330,186 @@ final class LosslessSwitcherController: NSObject, ObservableObject {
     }
 
     private func finishLibraryCacheScan(_ result: MusicLibraryTrackScanResult) {
-        isLibraryCacheScanInProgress = false
-
         switch result {
         case .success(let scan):
             let cacheableTracks = scan.tracks.filter(\.isSampleRateReliable)
-            let storedCount = formatCache.storeAll(cacheableTracks)
+            let metadataStoredCount = formatCache.storeAll(cacheableTracks)
             cachedTrackCount = formatCache.count
-            let skippedCount = max(scan.scannedTrackCount - cacheableTracks.count, 0)
-            let limitedSuffix = scan.scannedTrackCount < scan.totalTrackCount
-                ? " Scanned first \(scan.scannedTrackCount) of \(scan.totalTrackCount)."
-                : ""
-            let skippedSuffix = skippedCount > 0
-                ? " Skipped \(skippedCount) streaming/unknown tracks."
-                : ""
 
-            lastSwitchStatus = "\(scan.scope.label) cache updated: \(storedCount) new"
+            let probeCandidates = scan.tracks.filter { source in
+                !source.isSampleRateReliable
+                    && !source.persistentID.isEmpty
+                    && formatCache.format(for: source) == nil
+            }
+
+            guard !probeCandidates.isEmpty else {
+                isLibraryCacheScanInProgress = false
+                finishLibraryCacheScanWithoutProbe(scan: scan, metadataStoredCount: metadataStoredCount)
+                return
+            }
+
+            lastSwitchStatus = "Probing \(min(probeCandidates.count, maximumProbeTrackCount)) \(scan.scope.label.lowercased()) tracks..."
             appendLog(
-                title: "\(scan.scope.label) Cached",
-                detail: "\(scan.name): \(storedCount) new, \(cacheableTracks.count) usable.\(skippedSuffix)\(limitedSuffix)",
+                title: "Stream Probe Started",
+                detail: "Briefly playing Apple Music stream tracks to read real CoreAudio sample rates.",
                 isError: false
             )
+            probeLibraryTracks(scan: scan, metadataStoredCount: metadataStoredCount, candidates: probeCandidates)
 
         case .inactive(let message):
+            isLibraryCacheScanInProgress = false
             lastSwitchStatus = message
             appendLog(title: "Song Memory Scan Skipped", detail: message, isError: true)
 
         case .failed(let message):
+            isLibraryCacheScanInProgress = false
             lastSwitchStatus = message
             appendLog(title: "Song Memory Scan Failed", detail: message, isError: true)
         }
+    }
+
+    private func finishLibraryCacheScanWithoutProbe(
+        scan: MusicLibraryTrackScan,
+        metadataStoredCount: Int
+    ) {
+        let limitedSuffix = scan.scannedTrackCount < scan.totalTrackCount
+            ? " Scanned first \(scan.scannedTrackCount) of \(scan.totalTrackCount)."
+            : ""
+        let skippedCount = scan.tracks.filter { source in
+            !source.isSampleRateReliable && formatCache.format(for: source) == nil
+        }.count
+        let skippedSuffix = skippedCount > 0
+            ? " \(skippedCount) tracks need playback probing."
+            : ""
+
+        lastSwitchStatus = "\(scan.scope.label) cache updated: \(metadataStoredCount) new"
+        appendLog(
+            title: "\(scan.scope.label) Cached",
+            detail: "\(scan.name): \(metadataStoredCount) new from metadata.\(skippedSuffix)\(limitedSuffix)",
+            isError: false
+        )
+    }
+
+    private func probeLibraryTracks(
+        scan: MusicLibraryTrackScan,
+        metadataStoredCount: Int,
+        candidates: [DetectedAudioSource]
+    ) {
+        let detector = musicDetector
+        let probeTrackTimeout = probeTrackTimeout
+        let maximumProbeTrackCount = maximumProbeTrackCount
+
+        detectionQueue.async { [weak self] in
+            let snapshot = detector.capturePlaybackSnapshot()
+            let probeTargets = Array(candidates.prefix(maximumProbeTrackCount))
+            let skippedProbeCount = max(candidates.count - probeTargets.count, 0)
+            let formatProbe = ConsoleAudioFormatStreamProbe()
+            let probeStartError = formatProbe.start()
+            var probedSources: [DetectedAudioSource] = []
+            var fallbackSources: [DetectedAudioSource] = []
+            var failedProbeCount = 0
+            var probeError = probeStartError
+            var hasObservedFormat = false
+
+            defer {
+                formatProbe.stop()
+                detector.restorePlayback(snapshot)
+            }
+
+            for (index, source) in probeTargets.enumerated() {
+                DispatchQueue.main.async { [weak self] in
+                    self?.lastSwitchStatus = "Probing \(index + 1) of \(probeTargets.count)..."
+                }
+
+                formatProbe.reset()
+                let startedAt = Date()
+                if let error = detector.playTrack(persistentID: source.persistentID) {
+                    failedProbeCount += 1
+                    NSLog("LosslessSwitcher stream probe failed for \(source.displayTitle): \(error)")
+                    continue
+                }
+
+                if probeStartError == nil,
+                   let format = formatProbe.waitForFormat(after: startedAt, timeout: probeTrackTimeout) {
+                    hasObservedFormat = true
+                    probedSources.append(source.withConsoleFormat(format))
+                } else if probeError == nil, let error = formatProbe.errorMessage {
+                    probeError = error
+                    failedProbeCount += 1
+                } else if probeError == nil,
+                          hasObservedFormat,
+                          let fallbackSource = Self.metadataFallbackSource(for: source) {
+                    fallbackSources.append(fallbackSource)
+                } else {
+                    failedProbeCount += 1
+                }
+            }
+
+            let result = LibraryProbeResult(
+                scan: scan,
+                metadataStoredCount: metadataStoredCount,
+                probedSources: probedSources,
+                fallbackSources: fallbackSources,
+                failedProbeCount: failedProbeCount,
+                skippedProbeCount: skippedProbeCount,
+                probeError: probeError
+            )
+
+            DispatchQueue.main.async { [weak self] in
+                self?.finishLibraryProbe(result)
+            }
+        }
+    }
+
+    nonisolated private static func metadataFallbackSource(
+        for source: DetectedAudioSource
+    ) -> DetectedAudioSource? {
+        guard source.sampleRate > 0 else {
+            return nil
+        }
+
+        return DetectedAudioSource(
+            appName: source.appName,
+            title: source.title,
+            artist: source.artist,
+            album: source.album,
+            kind: source.kind,
+            cloudStatus: source.cloudStatus,
+            persistentID: source.persistentID,
+            sampleRate: source.sampleRate,
+            bitDepth: source.bitDepth,
+            bitRate: source.bitRate,
+            formatSource: "Music metadata fallback",
+            isSampleRateReliable: true,
+            sampleRateNote: nil
+        )
+    }
+
+    private func finishLibraryProbe(_ result: LibraryProbeResult) {
+        isLibraryCacheScanInProgress = false
+
+        let probedStoredCount = formatCache.storeAll(result.probedSources)
+        let fallbackStoredCount = formatCache.storeAll(result.fallbackSources)
+        cachedTrackCount = formatCache.count
+
+        let totalStoredCount = result.metadataStoredCount + probedStoredCount + fallbackStoredCount
+        let limitedSuffix = result.scan.scannedTrackCount < result.scan.totalTrackCount
+            ? " Scanned first \(result.scan.scannedTrackCount) of \(result.scan.totalTrackCount)."
+            : ""
+        let skippedSuffix = result.skippedProbeCount > 0
+            ? " Skipped \(result.skippedProbeCount) beyond the \(maximumProbeTrackCount)-track probe limit."
+            : ""
+        let failedSuffix = result.failedProbeCount > 0
+            ? " \(result.failedProbeCount) probes did not produce a decoder format."
+            : ""
+        let errorSuffix = result.probeError.map { " Probe monitor: \($0)" } ?? ""
+
+        lastSwitchStatus = "\(result.scan.scope.label) cache updated: \(totalStoredCount) new"
+        appendLog(
+            title: "\(result.scan.scope.label) Cached",
+            detail: "\(result.scan.name): \(result.metadataStoredCount) metadata, \(probedStoredCount) live, \(fallbackStoredCount) fallback.\(failedSuffix)\(skippedSuffix)\(limitedSuffix)\(errorSuffix)",
+            isError: result.failedProbeCount > 0 && totalStoredCount == 0
+        )
     }
 
     func refreshLaunchAtLoginStatus() {

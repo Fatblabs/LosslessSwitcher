@@ -162,6 +162,12 @@ enum MusicLibraryTrackScanResult: Hashable, Sendable {
     case failed(String)
 }
 
+struct MusicPlaybackSnapshot: Hashable, Sendable {
+    let playerState: String
+    let persistentID: String
+    let playerPosition: Double
+}
+
 func sampleRateLabel(_ sampleRate: Double) -> String {
     let khz = sampleRate / 1_000
     if abs(khz.rounded() - khz) < 0.01 {
